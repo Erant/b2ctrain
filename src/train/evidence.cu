@@ -93,8 +93,8 @@ __global__ void fold_view_kernel(int n, const float* __restrict__ acc, const flo
   float w_in = acc[i * 3], err = acc[i * 3 + 1], w_all = acc[i * 3 + 2];
   float* e = ev + (size_t)i * 7;
   e[0] += w_in; e[1] += w_all; e[2] += err;
-  if (w_in > 1.f) {
-    e[3] += 1.f;
+  if (w_in > 1.f) e[3] += 1.f;
+  if (w_in != 0.f) {
     float4 p = pos[i];
     float3 d = make_float3(cam.x - p.x, cam.y - p.y, cam.z - p.z);
     float l = fmaxf(len3(d), 1e-12f);
