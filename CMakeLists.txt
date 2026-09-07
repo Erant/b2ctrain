@@ -18,6 +18,16 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 find_package(Threads REQUIRED)
 
+# The CUDA headers for the HOST compiler. nvcc finds cuda_fp16.h and friends
+# on its own, but src/gpu/*.cuh is included from plain .cpp translation
+# units too (trainer.cpp through gpu/render.h, and every other consumer of
+# a device struct), and c++ has no idea where the toolkit lives. On a box
+# with a distro CUDA package this works by accident — Ubuntu drops a copy
+# in /usr/include — and then fails in a container built on
+# nvidia/cuda:*-devel, where the toolkit is only under /usr/local/cuda.
+# Caught by b2crunner's image build (2026-09-07).
+find_package(CUDAToolkit REQUIRED)
+
 add_library(b2c_core STATIC
   src/util/log.cpp
   src/cli.cpp
@@ -42,7 +52,7 @@ add_library(b2c_core STATIC
   src/render/renderer.cpp
   src/render/confidence.cu
 )
-target_include_directories(b2c_core PUBLIC src third_party)
+target_include_directories(b2c_core PUBLIC src third_party ${CUDAToolkit_INCLUDE_DIRS})
 target_link_libraries(b2c_core PUBLIC Threads::Threads)
 target_compile_options(b2c_core PRIVATE
   $<$<COMPILE_LANGUAGE:CXX>:-Wall -Wextra -Wno-unused-parameter -Wno-missing-field-initializers -Wno-unknown-pragmas -O3>
