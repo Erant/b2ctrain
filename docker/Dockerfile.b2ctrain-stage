@@ -1,0 +1,21 @@
+# syntax=docker/dockerfile:1
+# Builder stage for b2ctrain, to be spliced into b2crunner's docker/Dockerfile next to `brush-builder`.
+# The binary statically links the CUDA runtime, so the runtime image needs only the NVIDIA driver
+# (>= 580 for the CUDA 13 build; use a 12.8 devel image and driver >= 570 if you need older drivers).
+FROM nvidia/cuda:13.0.1-devel-ubuntu24.04 AS b2ctrain-builder
+RUN apt-get update && apt-get install -y --no-install-recommends git cmake ninja-build g++ ca-certificates && rm -rf /var/lib/apt/lists/*
+ARG B2CTRAIN_REPO=https://github.com/Erant/b2ctrain.git
+ARG B2CTRAIN_REF=main
+RUN git clone --depth 1 --branch ${B2CTRAIN_REF} ${B2CTRAIN_REPO} /src/b2ctrain
+WORKDIR /src/b2ctrain
+RUN cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_CUDA_ARCHITECTURES="89-real;120-real;120-virtual" \
+ && cmake --build build --target b2ctrain \
+ && install -m 0755 build/b2ctrain /out-b2ctrain
+
+# In the runtime stage:
+#   COPY --from=b2ctrain-builder /out-b2ctrain /usr/local/bin/b2ctrain
+# and point the workflow at it (pipeline/workflows/fast_helical_native.yaml, both brush steps):
+#   brush_path: b2ctrain
+# The renderer can replace brush-splat-render as well (no Vulkan needed):
+#   ENV BRUSH_SPLAT_RENDER="b2ctrain render"   # if the pipeline's resolver accepts a command with arguments,
+# otherwise install a one-line wrapper script named brush-splat-render that execs `b2ctrain render "$@"`.

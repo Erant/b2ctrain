@@ -1,0 +1,3 @@
+#!/bin/sh
+# Drop-in shim: b2crunner resolves `brush-splat-render` on PATH (or $BRUSH_SPLAT_RENDER); route it to b2ctrain render.
+exec b2ctrain render "$@"

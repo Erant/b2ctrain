@@ -113,7 +113,7 @@ const std::vector<std::pair<const char*, std::vector<Opt>>>& groups() {
       {"rerun-max-img-size", "N", "(ignored)", [](Config&, const char*) {}},
     }},
     {"b2ctrain options", {
-      {"recipe", "RECIPE", "Training recipe: `brush` reproduces the brush fork's dynamics, `fast` enables the validated accelerations [default: fast]",
+      {"recipe", "RECIPE", "Training recipe: `brush` reproduces the brush fork's dynamics (accumulating 3D-filter floor, dense Adam, full resolution); `fast` adds sparse Adam, the progressive resolution schedule and the non-accumulating floor [default: fast]",
         [](Config& c, const char* v) {
           if (!strcmp(v, "brush")) c.recipe = Recipe::Brush; else if (!strcmp(v, "fast")) c.recipe = Recipe::Fast;
           else fail("invalid value '%s' for '--recipe' [possible values: brush, fast]", v); }},

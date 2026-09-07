@@ -65,6 +65,8 @@ int train_main(const Config& cfg) {
   Dataset ds = load_dataset(cfg);
   SplatCloud init = initial_splats(ds, cfg);
   GpuViews gv; gv.upload(ds.train);
+  const bool res_schedule = cfg.res_schedule || cfg.recipe == Recipe::Fast;
+  if (res_schedule) gv.build_pyramid(3, stream);
   GpuViews gv_eval; if (!ds.eval.empty()) gv_eval.upload(ds.eval);
   Model model; model.upload(init, stream);
   RenderCtx ctx; ctx.setup(std::max(gv.max_w, gv_eval.max_w), std::max(gv.max_h, gv_eval.max_h), model.cap, stream);
@@ -142,7 +144,9 @@ int train_main(const Config& cfg) {
     step++;
     timer.begin(stream);
     int vi = next_view();
-    const ViewGPU& view = gv.views[vi];
+    int level = 0;
+    if (res_schedule) { float pr = (float)step / (float)std::max(1u, total); level = pr < 0.15f ? 2 : (pr < 0.4f ? 1 : 0); }
+    const ViewGPU& view = gv.lvl_views[level].empty() ? gv.views[vi] : gv.lvl_views[level][vi];
     const Camera& cam = gv.cams[vi];
     bool normals_active = cfg.normal_loss_weight > 0.f && step >= cfg.normal_loss_start_iter && ((step - cfg.normal_loss_start_iter) % cfg.normal_loss_every == 0) && view.normals != nullptr;
     float bg[3];
@@ -180,7 +184,7 @@ int train_main(const Config& cfg) {
     op.lr_mean = (float)(cfg.lr_mean * std::pow(lr_decay, (double)step - 1.0) * median_scale);
     op.lr_rot = cfg.lr_rotation; op.lr_scale = cfg.lr_scale; op.lr_opac = cfg.lr_opac; op.lr_dc = cfg.lr_coeffs_dc; op.lr_sh_rest = cfg.lr_coeffs_dc / cfg.lr_coeffs_sh_scale;
     op.noise_weight = op.lr_mean * cfg.mean_noise_weight; op.noise_clamp = median_scale;
-    op.seed = (uint32_t)cfg.seed; op.step = step; op.sparse = cfg.sparse_adam;
+    op.seed = (uint32_t)cfg.seed; op.step = step; op.sparse = cfg.sparse_adam || cfg.recipe == Recipe::Fast;
     optimizer_step(ctx, model, op, stream);
     timer.mark("optim", stream);
 

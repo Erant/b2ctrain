@@ -28,6 +28,7 @@ __global__ void __launch_bounds__(TILE_PX) photometric_kernel(
   const int tx0 = (tile % tiles_x) * TILE_W, ty0 = (tile / tiles_x) * TILE_W;
   const int tid = threadIdx.x;
   const float bg_c = lp.composite ? lp.bg[c] : 0.f;
+  float flat_diff = 0.f;
 
   // Load 36x36 footprint (zero outside the image).
   for (int i = tid; i < IN_W * IN_W; i += TILE_PX) {
@@ -43,8 +44,34 @@ __global__ void __launch_bounds__(TILE_PX) photometric_kernel(
       if (lp.composite) g += (1.f - gt_channel(gp, 3)) * bg_c;
     }
     s_in[0][i] = p; s_in[1][i] = g;
+    flat_diff = fmaxf(flat_diff, fabsf(p - g));
   }
-  __syncthreads();
+  // Flat tile: prediction equals the effective ground truth over the whole footprint (and the alpha lane matches),
+  // so the L1 and SSIM gradients are exactly zero. Only the constant SSIM term contributes to the loss value.
+  if (c == 0 && lp.alpha_lane) {
+    int ly = tid / TILE_W, lx = tid % TILE_W;
+    int gy = ty0 + ly, gx = tx0 + lx;
+    if (gy < H && gx < W) { int pix = gy * W + gx; flat_diff = fmaxf(flat_diff, fabsf(pred[pix].w - gt_channel(gt[pix], 3))); }
+  }
+  if (__syncthreads_or(flat_diff > 0.f) == 0) {
+    int ly = tid / TILE_W, lx = tid % TILE_W;
+    int gy = ty0 + ly, gx = tx0 + lx;
+    float loss_local = 0.f;
+    if (gy < H && gx < W) {
+      int pix = gy * W + gx;
+      uint32_t gp = gt[pix];
+      float wp = weights ? weights[pix] * (1.f / 255.f) : 1.f;
+      float M = wp * (lp.mask ? gt_channel(gp, 3) : 1.f) * lp.scale / (3.f * (float)W * (float)H);
+      loss_local = M * lp.ssim_w;  // SSIM == 1 exactly
+      v_out[(size_t)pix * 4 + c] = 0.f;
+      if (c == 0) v_out[(size_t)pix * 4 + 3] = 0.f;
+    }
+    float sred = warp_sum(loss_local);
+    if ((tid & 31) == 0) s_red[tid >> 5] = sred;
+    __syncthreads();
+    if (tid == 0) { float t = 0.f; for (int i = 0; i < TILE_PX / 32; i++) t += s_red[i]; atomicAdd(loss_accum, t); }
+    return;
+  }
   // Horizontal blur: for rows 0..35, output cols 0..25 (input cols lx+0..lx+10).
   for (int i = tid; i < IN_W * STAT_W; i += TILE_PX) {
     int ly = i / STAT_W, ox = i % STAT_W;
