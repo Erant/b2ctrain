@@ -104,7 +104,7 @@ __global__ void split_kernel(int count, const uint32_t* __restrict__ parents, co
                              float4* __restrict__ pos, float4* __restrict__ quat, float4* __restrict__ ls, float* __restrict__ sh,
                              float4* __restrict__ m_pos, float4* __restrict__ v_pos, float4* __restrict__ m_q, float4* __restrict__ v_q, float4* __restrict__ m_ls, float4* __restrict__ v_ls,
                              float* __restrict__ m_sh, float* __restrict__ v_sh, size_t stride, float* __restrict__ refine_norm, float* __restrict__ max_screen, float* __restrict__ vis_count,
-                             uint32_t* __restrict__ tile_count, float split_at_screen_size) {
+                             uint32_t* __restrict__ tile_count, uint32_t* __restrict__ last_step, float split_at_screen_size) {
   int i = blockIdx.x * blockDim.x + threadIdx.x;
   if (i >= count) return;
   uint32_t p = parents[i], c = child_slots[i];
@@ -140,7 +140,7 @@ __global__ void split_kernel(int count, const uint32_t* __restrict__ parents, co
   m_pos[c] = z4; v_pos[c] = z4; m_q[c] = z4; v_q[c] = z4; m_ls[c] = z4; v_ls[c] = z4;
   for (int j = 0; j < K3; j++) { m_sh[(size_t)j * stride + p] = 0.f; m_sh[(size_t)j * stride + c] = 0.f; }
   v_sh[p] = 0.f; v_sh[c] = 0.f;
-  refine_norm[c] = 0.f; max_screen[c] = 0.f; vis_count[c] = 0.f; tile_count[c] = 0u;
+  refine_norm[c] = 0.f; max_screen[c] = 0.f; vis_count[c] = 0.f; tile_count[c] = 0u; last_step[c] = 0u; last_step[p] = 0u;
 }
 
 __global__ void opacity_decay_kernel(int n, float4* __restrict__ pos, float delta) {
@@ -311,7 +311,7 @@ RefineStats RefineState::run(Model& m, RenderCtx& ctx, const RefineParams& p, cu
     if (appended) append_slots_kernel<<<div_up(appended, 256), 256, 0, stream>>>(appended, (uint32_t)n, sel_child.ptr + from_dead);
     if (m.cap > (int)ctx.tile_count.count) ctx.setup(ctx.W, ctx.H, m.cap, stream);
     if (appended) CUDA_CHECK(cudaMemsetAsync(ctx.tile_count.ptr + n, 0, appended * sizeof(uint32_t), stream));
-#define SK(K) split_kernel<K><<<div_up(n_sel, 256), 256, 0, stream>>>(n_sel, sel_parent, sel_child, m.pos_op, m.quat, m.lscale, m.sh, m.m_pos_op, m.v_pos_op, m.m_quat, m.v_quat, m.m_lscale, m.v_lscale, m.m_sh, m.v_sh, (size_t)m.cap, m.refine_norm, m.max_screen, m.vis_count, ctx.tile_count, p.split_at_screen_size)
+#define SK(K) split_kernel<K><<<div_up(n_sel, 256), 256, 0, stream>>>(n_sel, sel_parent, sel_child, m.pos_op, m.quat, m.lscale, m.sh, m.m_pos_op, m.v_pos_op, m.m_quat, m.v_quat, m.m_lscale, m.v_lscale, m.m_sh, m.v_sh, (size_t)m.cap, m.refine_norm, m.max_screen, m.vis_count, ctx.tile_count, m.last_step, p.split_at_screen_size)
     switch (m.degree) { case 0: SK(3); break; case 1: SK(12); break; case 2: SK(27); break; case 3: SK(48); break; default: SK(75); break; }
 #undef SK
     CUDA_KERNEL_CHECK();

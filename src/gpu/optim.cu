@@ -102,7 +102,7 @@ __global__ void __launch_bounds__(128) optim_kernel(
     float4* __restrict__ m_pos, float4* __restrict__ v_pos, float4* __restrict__ m_q, float4* __restrict__ v_q, float4* __restrict__ m_ls, float4* __restrict__ v_ls,
     float* __restrict__ m_sh, float* __restrict__ v_sh, int sh_stride, float4* __restrict__ sh_upd,
     float* __restrict__ v_splat, uint32_t* __restrict__ vis_flag, const uint32_t* __restrict__ tile_count,
-    float* __restrict__ refine_norm, float* __restrict__ vis_count,
+    float* __restrict__ refine_norm, float* __restrict__ vis_count, uint32_t* __restrict__ last_step,
     CamDev cam, OptimParams op) {
   constexpr int K = (DEG + 1) * (DEG + 1);
   int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -125,6 +125,11 @@ __global__ void __launch_bounds__(128) optim_kernel(
   for (int k = 0; k < (int)GRAD_LANES; k++) finite = finite && isfinite(g[k]);
   if (!finite) any = false;
   if (op.sparse && !any) return;
+  // Lazy sparse Adam: catch up on the steps skipped while invisible. With zero gradient the dense update would have
+  // decayed the moments and applied a geometric series of momentum steps; both have closed forms (bias corrections and
+  // the mean LR treated as constant over the gap).
+  float skipped = 0.f;
+  if (op.sparse) { uint32_t ls = last_step[i]; skipped = ls == 0u ? 0.f : fmaxf((float)op.t - (float)ls - 1.f, 0.f); last_step[i] = (uint32_t)op.t; }
 
   float4 po = pos_op[i], q = quat[i], ls = lscale[i];
   float3 g_pos = make_float3(0, 0, 0); float g_op = 0.f; float4 g_q = make_float4(0, 0, 0, 0); float3 g_ls = make_float3(0, 0, 0);
@@ -244,20 +249,40 @@ __global__ void __launch_bounds__(128) optim_kernel(
   }
   // ---- Adam ----
   float bc1 = 1.f / (1.f - powf(op.beta1, (float)op.t)), bc2 = 1.f / (1.f - powf(op.beta2, (float)op.t));
+  float d1 = 1.f, d2 = 1.f, drift = 0.f;  // catch-up factors: m *= d1, v *= d2, p -= lr * drift * m_hat / (sqrt(v_hat) + eps)
+  if (skipped > 0.f) {
+    d1 = powf(op.beta1, skipped); d2 = powf(op.beta2, skipped);
+    const float r = op.beta1 / sqrtf(op.beta2);
+    drift = r * (1.f - powf(r, skipped)) / (1.f - r);
+  }
+  auto catch_up = [&](float4& p, float4& m, float4& v, float4 lr) {
+    if (skipped <= 0.f) return;
+    p.x -= lr.x * drift * (m.x * bc1) / (sqrtf(v.x * bc2) + op.eps);
+    p.y -= lr.y * drift * (m.y * bc1) / (sqrtf(v.y * bc2) + op.eps);
+    p.z -= lr.z * drift * (m.z * bc1) / (sqrtf(v.z * bc2) + op.eps);
+    p.w -= lr.w * drift * (m.w * bc1) / (sqrtf(v.w * bc2) + op.eps);
+    m.x *= d1; m.y *= d1; m.z *= d1; m.w *= d1; v.x *= d2; v.y *= d2; v.z *= d2; v.w *= d2;
+  };
   {
     float4 m = m_pos[i], v = v_pos[i];
-    adam4(po, m, v, make_float4(g_pos.x, g_pos.y, g_pos.z, g_op), make_float4(op.lr_mean, op.lr_mean, op.lr_mean, op.lr_opac), op.beta1, op.beta2, bc1, bc2, op.eps);
+    float4 lr = make_float4(op.lr_mean, op.lr_mean, op.lr_mean, op.lr_opac);
+    catch_up(po, m, v, lr);
+    adam4(po, m, v, make_float4(g_pos.x, g_pos.y, g_pos.z, g_op), lr, op.beta1, op.beta2, bc1, bc2, op.eps);
     m_pos[i] = m; v_pos[i] = v;
   }
   {
     float4 m = m_q[i], v = v_q[i];
-    adam4(q, m, v, g_q, make_float4(op.lr_rot, op.lr_rot, op.lr_rot, op.lr_rot), op.beta1, op.beta2, bc1, bc2, op.eps);
+    float4 lr = make_float4(op.lr_rot, op.lr_rot, op.lr_rot, op.lr_rot);
+    catch_up(q, m, v, lr);
+    adam4(q, m, v, g_q, lr, op.beta1, op.beta2, bc1, bc2, op.eps);
     m_q[i] = m; v_q[i] = v; quat[i] = q;
   }
   {
     float4 m = m_ls[i], v = v_ls[i];
     float4 lsv = ls; float fkeep = ls.w;
-    adam4(lsv, m, v, make_float4(g_ls.x, g_ls.y, g_ls.z, 0.f), make_float4(op.lr_scale, op.lr_scale, op.lr_scale, 0.f), op.beta1, op.beta2, bc1, bc2, op.eps);
+    float4 lr = make_float4(op.lr_scale, op.lr_scale, op.lr_scale, 0.f);
+    catch_up(lsv, m, v, lr);
+    adam4(lsv, m, v, make_float4(g_ls.x, g_ls.y, g_ls.z, 0.f), lr, op.beta1, op.beta2, bc1, bc2, op.eps);
     lsv.w = fkeep; m.w = 0.f; v.w = 0.f;
     m_ls[i] = m; v_ls[i] = v; lscale[i] = lsv; ls = lsv;
   }
@@ -268,17 +293,22 @@ __global__ void __launch_bounds__(128) optim_kernel(
 #pragma unroll
     for (int k = 0; k < K; k++) bsq += basis[k] * basis[k];
     float gsq = bsq * (vc.x * vc.x + vc.y * vc.y + vc.z * vc.z) * (1.f / (float)(K * 3));
-    float v = op.beta2 * v_sh[i] + (1.f - op.beta2) * gsq; v_sh[i] = v;
+    float v_old = v_sh[i] * d2;
+    float denom_old = skipped > 0.f ? drift * bc1 / (sqrtf(v_old * bc2) + op.eps) : 0.f;
+    float v = op.beta2 * v_old + (1.f - op.beta2) * gsq; v_sh[i] = v;
     float denom = bc1 / (sqrtf(v * bc2) + op.eps);
 #pragma unroll
     for (int k = 0; k < K; k++) {
-      float lr = (k == 0 ? op.lr_dc : op.lr_sh_rest) * denom;
+      float lrk = (k == 0 ? op.lr_dc : op.lr_sh_rest);
       float gk[3] = {basis[k] * vc.x, basis[k] * vc.y, basis[k] * vc.z};
 #pragma unroll
       for (int ch = 0; ch < 3; ch++) {
         size_t o = (size_t)(k * 3 + ch) * stride;
-        float m = op.beta1 * msh[o] + (1.f - op.beta1) * gk[ch]; msh[o] = m;
-        shp[o] -= lr * m;
+        float m_old = msh[o];
+        float p = shp[o];
+        if (skipped > 0.f) { p -= lrk * denom_old * m_old; m_old *= d1; }
+        float m = op.beta1 * m_old + (1.f - op.beta1) * gk[ch]; msh[o] = m;
+        shp[o] = p - lrk * denom * m;
       }
     }
   }
@@ -331,7 +361,7 @@ void optimizer_step(RenderCtx& ctx, Model& m, const OptimParams& op, cudaStream_
   CamDev cam = to_camdev(op.cam);
   int blocks = div_up(m.n, 128);
   ctx.sh_upd.reserve((size_t)m.cap);
-#define L(D) optim_kernel<D><<<blocks, 128, 0, stream>>>(m.n, m.pos_op, m.quat, m.lscale, m.sh, m.m_pos_op, m.v_pos_op, m.m_quat, m.v_quat, m.m_lscale, m.v_lscale, m.m_sh, m.v_sh, m.cap, ctx.sh_upd, ctx.v_splat, ctx.vis_flag, ctx.tile_count, m.refine_norm, m.vis_count, cam, op)
+#define L(D) optim_kernel<D><<<blocks, 128, 0, stream>>>(m.n, m.pos_op, m.quat, m.lscale, m.sh, m.m_pos_op, m.v_pos_op, m.m_quat, m.v_quat, m.m_lscale, m.v_lscale, m.m_sh, m.v_sh, m.cap, ctx.sh_upd, ctx.v_splat, ctx.vis_flag, ctx.tile_count, m.refine_norm, m.vis_count, m.last_step, cam, op)
   switch (m.degree) { case 0: L(0); break; case 1: L(1); break; case 2: L(2); break; case 3: L(3); break; case 4: L(4); break; default: throw std::runtime_error("bad degree"); }
 #undef L
   CUDA_KERNEL_CHECK();

@@ -18,6 +18,7 @@ struct Model {
   DevBuf<float> m_sh, v_sh;
   // Refine statistics accumulated between refines.
   DevBuf<float> refine_norm, max_screen, vis_count;
+  DevBuf<uint32_t> last_step;  // Adam step at which the splat was last updated (lazy sparse Adam)
   int adam_t = 0;
 
   int K() const { return sh_coeffs_for_degree(degree); }

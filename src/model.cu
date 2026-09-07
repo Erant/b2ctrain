@@ -19,12 +19,13 @@ void Model::reserve(int want, cudaStream_t stream) {
   grow4(pos_op); grow4(quat); grow4(lscale); grow_planar(sh);
   grow4(m_pos_op); grow4(v_pos_op); grow4(m_quat); grow4(v_quat); grow4(m_lscale); grow4(v_lscale);
   grow_planar(m_sh); growf(v_sh);
-  growf(refine_norm); growf(max_screen); growf(vis_count);
+  growf(refine_norm); growf(max_screen); growf(vis_count); last_step.reserve((size_t)ncap, true, stream);
   size_t old = cap;
   auto zero_tail4 = [&](DevBuf<float4>& b) { CUDA_CHECK(cudaMemsetAsync(b.ptr + old, 0, (ncap - old) * sizeof(float4), stream)); };
   auto zero_tailf = [&](DevBuf<float>& b) { CUDA_CHECK(cudaMemsetAsync(b.ptr + old, 0, (ncap - old) * sizeof(float), stream)); };
   zero_tail4(m_pos_op); zero_tail4(v_pos_op); zero_tail4(m_quat); zero_tail4(v_quat); zero_tail4(m_lscale); zero_tail4(v_lscale);
   zero_tailf(v_sh); zero_tailf(refine_norm); zero_tailf(max_screen); zero_tailf(vis_count);
+  CUDA_CHECK(cudaMemsetAsync(last_step.ptr + old, 0, (ncap - old) * sizeof(uint32_t), stream));
   cap = ncap;
 }
 
@@ -34,7 +35,7 @@ void Model::upload(const SplatCloud& c, cudaStream_t stream) {
   cap = 0;
   pos_op.free(); quat.free(); lscale.free(); sh.free();
   m_pos_op.free(); v_pos_op.free(); m_quat.free(); v_quat.free(); m_lscale.free(); v_lscale.free(); m_sh.free(); v_sh.free();
-  refine_norm.free(); max_screen.free(); vis_count.free();
+  refine_norm.free(); max_screen.free(); vis_count.free(); last_step.free();
   reserve(n, stream);
   std::vector<float4> p(n), q(n), s(n);
   for (int i = 0; i < n; i++) {
@@ -72,7 +73,7 @@ SplatCloud Model::download(cudaStream_t stream) const {
 
 void Model::zero_optimizer(cudaStream_t stream) {
   m_pos_op.zero(stream); v_pos_op.zero(stream); m_quat.zero(stream); v_quat.zero(stream); m_lscale.zero(stream); v_lscale.zero(stream);
-  m_sh.zero(stream); v_sh.zero(stream); adam_t = 0;
+  m_sh.zero(stream); v_sh.zero(stream); adam_t = 0; last_step.zero(stream);
 }
 void Model::zero_stats(cudaStream_t stream) { refine_norm.zero(stream); max_screen.zero(stream); vis_count.zero(stream); }
 
