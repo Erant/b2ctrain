@@ -8,7 +8,7 @@ namespace b2c {
 //   pos_op : (mean x, y, z, raw opacity logit)
 //   quat   : (w, x, y, z), unnormalised
 //   lscale : (log sx, log sy, log sz, min-scale floor f)   -- f is a frozen constant, 0 = none
-//   sh     : [n][K][3] coefficient-major, K = (degree+1)^2
+//   sh     : planar [K*3][cap]: lane (k*3+ch) of splat i at sh[(k*3+ch)*cap + i], K = (degree+1)^2
 struct Model {
   int n = 0, cap = 0, degree = 3;
   DevBuf<float4> pos_op, quat, lscale;

@@ -74,5 +74,8 @@ void rasterize_forward(RenderCtx& ctx, const RenderParams& p, cudaStream_t strea
 
 // Backward through rasterisation: consumes ctx.v_out / ctx.v_feat, produces ctx.v_splat; marks vis_count in the model.
 void rasterize_backward(RenderCtx& ctx, const Model& m, const RenderParams& p, cudaStream_t stream);
+// Tensor-core variant. The per-pixel gradients (ctx.v_out / v_feat) must have been produced with `grad_scale` applied;
+// the kernel divides the accumulated per-splat gradients by it.
+void rasterize_backward_tc(RenderCtx& ctx, const Model& m, const RenderParams& p, float grad_scale, cudaStream_t stream);
 
 }  // namespace b2c

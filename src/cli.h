@@ -58,6 +58,7 @@ struct Config {
   bool accumulate_min_scale = false;  // brush quirk: bake floor at every refine
   uint32_t sh_warmup_every = 0;       // 0 = all bands from step 1 (brush)
   bool bench = false;
+  std::string backward = "tc";       // tc | warp
   int device = 0;
   std::string checkpoint_dir;         // debug dumps
   bool help = false;

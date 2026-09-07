@@ -72,13 +72,16 @@ struct Harness {
     CUDA_CHECK(cudaMemcpy(h.ptr, ctx.loss_accum.ptr, 4 * sizeof(float), cudaMemcpyDeviceToHost));
     return (double)h.ptr[0] + (double)h.ptr[1];
   }
+  bool tc = false;
   std::vector<float> analytic() {
     int K = model.K(); size_t per = 11 + K * 3;
     grads.reserve((size_t)model.n * per); grads.zero();
+    lp.grad_scale = tc ? 3.f * sc->W * sc->H : 1.f;
     loss();
     ctx.v_feat.zero();
     if (lp.normal_scale > 0) normal_loss(ctx, view, lp, 0);
-    rasterize_backward(ctx, model, rp, 0);
+    if (tc) rasterize_backward_tc(ctx, model, rp, lp.grad_scale, 0); else rasterize_backward(ctx, model, rp, 0);
+    lp.grad_scale = 1.f;
     OptimParams op; op.cam = rp.cam; op.active_sh_degree = model.degree; op.grad_out = grads.ptr;
     optimizer_step(ctx, model, op, 0);
     return grads.download();
@@ -89,10 +92,10 @@ static float g_eps = 1e-4f;
 int main(int argc, char** argv) {
   if (argc > 1) g_eps = (float)atof(argv[1]);
   int fails = 0, total = 0, skipped = 0;
-  for (int cfg = 0; cfg < 3; cfg++) {
-    bool masked = cfg == 1, normals = cfg == 2;
-    Scene s = make_scene(1234 + cfg, 24);
-    Harness hs; hs.setup(s, masked, normals);
+  for (int cfg = 0; cfg < 6; cfg++) {
+    bool masked = cfg % 3 == 1, normals = cfg % 3 == 2, tc = cfg >= 3;
+    Scene s = make_scene(1234 + cfg % 3, 24);
+    Harness hs; hs.setup(s, masked, normals); hs.tc = tc;
     std::vector<float> an = hs.analytic();
     RefParams rp; rp.W = s.W; rp.H = s.H; rp.cam = s.cam; for (int k = 0; k < 3; k++) rp.bg[k] = hs.lp.bg[k];
     rp.composite = hs.lp.composite; rp.mask = hs.lp.mask; rp.alpha_lane = hs.lp.alpha_lane; rp.normals = normals;
@@ -126,7 +129,7 @@ int main(int argc, char** argv) {
         max_rel = std::max(max_rel, rel);
       }
     }
-    printf("cfg %d (%s%s): checked %d params, max rel err %.4f\n", cfg, masked ? "masked" : "transparent", normals ? "+normals" : "", checked, max_rel);
+    printf("cfg %d (%s%s%s): checked %d params, max rel err %.4f\n", cfg, masked ? "masked" : "transparent", normals ? "+normals" : "", tc ? " tc" : " warp", checked, max_rel);
   }
   printf("%d / %d mismatches (%d non-smooth points skipped)\n", fails, total, skipped);
   return fails == 0 ? 0 : 1;

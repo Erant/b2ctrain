@@ -46,56 +46,61 @@ __device__ __forceinline__ TileBox tile_bbox(float mx, float my, float ex, float
 }
 
 // Spherical harmonics (Sloan basis), coefficient-major [K][3]. Returns colour without the +0.5 offset.
+// SH storage is planar: coefficient k, channel ch of splat i lives at sh[(k*3+ch)*stride + i]; `c` points at splat i's lane 0.
+#define SHC(k, ch) c[((k) * 3 + (ch)) * stride]
+#define SH3(k) make_float3(SHC(k, 0), SHC(k, 1), SHC(k, 2))
 template <int DEG>
-__device__ __forceinline__ float3 sh_eval(const float* c, float3 v, int active) {
-  float3 col = make_float3(c[0], c[1], c[2]) * SH_C0_DEV;
+__device__ __forceinline__ float3 sh_eval(const float* c, size_t stride, float3 v, int active) {
+  float3 col = SH3(0) * SH_C0_DEV;
   if constexpr (DEG >= 1) if (active >= 1) {
     const float f0a = 0.4886025f;
-    col = col + make_float3(c[3], c[4], c[5]) * (-f0a * v.y);
-    col = col + make_float3(c[6], c[7], c[8]) * (f0a * v.z);
-    col = col + make_float3(c[9], c[10], c[11]) * (-f0a * v.x);
+    col = col + SH3(1) * (-f0a * v.y);
+    col = col + SH3(2) * (f0a * v.z);
+    col = col + SH3(3) * (-f0a * v.x);
     if constexpr (DEG >= 2) if (active >= 2) {
       float z2 = v.z * v.z;
       float f0b = -1.0925485f * v.z, f1a = 0.54627424f;
       float fc1 = v.x * v.x - v.y * v.y, fs1 = 2.f * v.x * v.y;
       float p4 = f1a * fs1, p5 = f0b * v.y, p6 = 0.9461747f * z2 - 0.31539157f, p7 = f0b * v.x, p8 = f1a * fc1;
-      col = col + make_float3(c[12], c[13], c[14]) * p4;
-      col = col + make_float3(c[15], c[16], c[17]) * p5;
-      col = col + make_float3(c[18], c[19], c[20]) * p6;
-      col = col + make_float3(c[21], c[22], c[23]) * p7;
-      col = col + make_float3(c[24], c[25], c[26]) * p8;
+      col = col + SH3(4) * p4;
+      col = col + SH3(5) * p5;
+      col = col + SH3(6) * p6;
+      col = col + SH3(7) * p7;
+      col = col + SH3(8) * p8;
       if constexpr (DEG >= 3) if (active >= 3) {
         float f0c = -2.285229f * z2 + 0.4570458f, f1b = 1.4453057f * v.z, f2a = -0.5900436f;
         float fc2 = v.x * fc1 - v.y * fs1, fs2 = v.x * fs1 + v.y * fc1;
         float p12 = v.z * (1.8658817f * z2 - 1.119529f);
         float p9 = f2a * fs2, p10 = f1b * fs1, p11 = f0c * v.y, p13 = f0c * v.x, p14 = f1b * fc1, p15 = f2a * fc2;
-        col = col + make_float3(c[27], c[28], c[29]) * p9;
-        col = col + make_float3(c[30], c[31], c[32]) * p10;
-        col = col + make_float3(c[33], c[34], c[35]) * p11;
-        col = col + make_float3(c[36], c[37], c[38]) * p12;
-        col = col + make_float3(c[39], c[40], c[41]) * p13;
-        col = col + make_float3(c[42], c[43], c[44]) * p14;
-        col = col + make_float3(c[45], c[46], c[47]) * p15;
+        col = col + SH3(9) * p9;
+        col = col + SH3(10) * p10;
+        col = col + SH3(11) * p11;
+        col = col + SH3(12) * p12;
+        col = col + SH3(13) * p13;
+        col = col + SH3(14) * p14;
+        col = col + SH3(15) * p15;
         if constexpr (DEG >= 4) if (active >= 4) {
           float f0d = v.z * (-4.683326f * z2 + 2.0071396f), f1c = 3.3116114f * z2 - 0.47308735f, f2b = -1.7701308f * v.z, f3a = 0.62583575f;
           float fc3 = v.x * fc2 - v.y * fs2, fs3 = v.x * fs2 + v.y * fc2;
           float p20 = 1.9843135f * v.z * p12 - 1.0062306f * p6;
           float p16 = f3a * fs3, p17 = f2b * fs2, p18 = f1c * fs1, p19 = f0d * v.y, p21 = f0d * v.x, p22 = f1c * fc1, p23 = f2b * fc2, p24 = f3a * fc3;
-          col = col + make_float3(c[48], c[49], c[50]) * p16;
-          col = col + make_float3(c[51], c[52], c[53]) * p17;
-          col = col + make_float3(c[54], c[55], c[56]) * p18;
-          col = col + make_float3(c[57], c[58], c[59]) * p19;
-          col = col + make_float3(c[60], c[61], c[62]) * p20;
-          col = col + make_float3(c[63], c[64], c[65]) * p21;
-          col = col + make_float3(c[66], c[67], c[68]) * p22;
-          col = col + make_float3(c[69], c[70], c[71]) * p23;
-          col = col + make_float3(c[72], c[73], c[74]) * p24;
+          col = col + SH3(16) * p16;
+          col = col + SH3(17) * p17;
+          col = col + SH3(18) * p18;
+          col = col + SH3(19) * p19;
+          col = col + SH3(20) * p20;
+          col = col + SH3(21) * p21;
+          col = col + SH3(22) * p22;
+          col = col + SH3(23) * p23;
+          col = col + SH3(24) * p24;
         }
       }
     }
   }
   return col;
 }
+#undef SH3
+#undef SHC
 
 // Evaluate the SH basis values b[k] for direction v (so colour = sum_k b[k] * c[k]). Used by the backward.
 template <int DEG>

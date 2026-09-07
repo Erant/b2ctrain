@@ -121,6 +121,7 @@ const std::vector<std::pair<const char*, std::vector<Opt>>>& groups() {
       {"res-schedule", nullptr, "Progressive resolution schedule (1/4 -> 1/2 -> 1x) over the first 40% of iterations", B(res_schedule)},
       {"accumulate-min-scale", nullptr, "Bake the Mip 3D-filter floor into scales at every refine (brush's behaviour) instead of applying it on the fly", B(accumulate_min_scale)},
       {"sh-warmup-every", "N", "Unlock one SH band every N iterations (0 = all bands from the start) [default: 0]", U(sh_warmup_every)},
+      {"backward", "MODE", "Rasterizer backward kernel: tc (tensor-core reduction) or warp (shuffle reduction) [default: tc]", S(backward)},
       {"bench", nullptr, "Print a per-kernel timing breakdown at the end", B(bench)},
       {"device", "N", "CUDA device index [default: 0]", [](Config& c, const char* v) { c.device = (int)parse_u(v, "device"); }},
       {"checkpoint-dir", "DIR", "Directory for debug dumps", S(checkpoint_dir)},

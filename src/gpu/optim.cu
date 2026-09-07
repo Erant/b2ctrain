@@ -46,9 +46,9 @@ __device__ __forceinline__ Sym2 inverse2x2_vjp(Sym2 minv, Sym2 v) {
 
 // SH view-direction VJP (port of brush's sh_color_viewdir_vjp). `c` is [K][3], vc = dL/dcolour.
 template <int DEG>
-__device__ __forceinline__ float3 sh_viewdir_vjp(const float* c, float3 v, float3 vc, int active) {
+__device__ __forceinline__ float3 sh_viewdir_vjp(const float* c, size_t stride, float3 v, float3 vc, int active) {
   float gx = 0.f, gy = 0.f, gz = 0.f;
-  auto dotc = [&](int k) { return c[k * 3] * vc.x + c[k * 3 + 1] * vc.y + c[k * 3 + 2] * vc.z; };
+  auto dotc = [&](int k) { return c[(k * 3) * stride] * vc.x + c[(k * 3 + 1) * stride] * vc.y + c[(k * 3 + 2) * stride] * vc.z; };
   float x = v.x, y = v.y, z = v.z;
   if constexpr (DEG >= 1) if (active >= 1) {
     const float f0a = 0.4886025f;
@@ -100,7 +100,7 @@ template <int DEG>
 __global__ void __launch_bounds__(128) optim_kernel(
     int n, float4* __restrict__ pos_op, float4* __restrict__ quat, float4* __restrict__ lscale, float* __restrict__ sh,
     float4* __restrict__ m_pos, float4* __restrict__ v_pos, float4* __restrict__ m_q, float4* __restrict__ v_q, float4* __restrict__ m_ls, float4* __restrict__ v_ls,
-    float* __restrict__ m_sh, float* __restrict__ v_sh,
+    float* __restrict__ m_sh, float* __restrict__ v_sh, int sh_stride,
     float* __restrict__ v_splat, uint32_t* __restrict__ vis_flag, const uint32_t* __restrict__ tile_count,
     float* __restrict__ refine_norm, float* __restrict__ vis_count,
     CamDev cam, OptimParams op) {
@@ -131,7 +131,7 @@ __global__ void __launch_bounds__(128) optim_kernel(
   float g_sh[K * 3];
 #pragma unroll
   for (int k = 0; k < K * 3; k++) g_sh[k] = 0.f;
-  const float* shc = sh + (size_t)i * K * 3;
+  const float* shc = sh + i; const size_t stride = (size_t)sh_stride;
 
   if (any) {
     ProjIntermediates pr = project_one(po, q, ls, cam, op.mip);
@@ -148,7 +148,7 @@ __global__ void __launch_bounds__(128) optim_kernel(
         float bk = k > 0 && ((k >= 1 && op.active_sh_degree < 1) || (k >= 4 && op.active_sh_degree < 2) || (k >= 9 && op.active_sh_degree < 3) || (k >= 16 && op.active_sh_degree < 4)) ? 0.f : basis[k];
         g_sh[k * 3] = bk * vc.x; g_sh[k * 3 + 1] = bk * vc.y; g_sh[k * 3 + 2] = bk * vc.z;
       }
-      float3 v_v = sh_viewdir_vjp<DEG>(shc, v, vc, op.active_sh_degree);
+      float3 v_v = sh_viewdir_vjp<DEG>(shc, stride, v, vc, op.active_sh_degree);
       float vdot = dot3(v, v_v);
       float3 v_mean_sh = (v_v - v * vdot) * (1.f / ul);
       // Opacity
@@ -260,8 +260,8 @@ __global__ void __launch_bounds__(128) optim_kernel(
     m_ls[i] = m; v_ls[i] = v; lscale[i] = lsv; ls = lsv;
   }
   {
-    float* msh = m_sh + (size_t)i * K * 3;
-    float* shp = sh + (size_t)i * K * 3;
+    float* msh = m_sh + i;
+    float* shp = sh + i;
     float gsq = 0.f;
 #pragma unroll
     for (int k = 0; k < K * 3; k++) gsq += g_sh[k] * g_sh[k];
@@ -270,9 +270,9 @@ __global__ void __launch_bounds__(128) optim_kernel(
     float denom = 1.f / (sqrtf(v * bc2) + op.eps);
 #pragma unroll
     for (int k = 0; k < K * 3; k++) {
-      float m = op.beta1 * msh[k] + (1.f - op.beta1) * g_sh[k]; msh[k] = m;
+      float m = op.beta1 * msh[k * stride] + (1.f - op.beta1) * g_sh[k]; msh[k * stride] = m;
       float lr = k < 3 ? op.lr_dc : op.lr_sh_rest;
-      shp[k] -= lr * (m * bc1) * denom;
+      shp[k * stride] -= lr * (m * bc1) * denom;
     }
   }
   // ---- MCMC noise on means ----
@@ -299,7 +299,7 @@ void optimizer_step(RenderCtx& ctx, Model& m, const OptimParams& op, cudaStream_
   if (m.n == 0) return;
   CamDev cam = to_camdev(op.cam);
   int blocks = div_up(m.n, 128);
-#define L(D) optim_kernel<D><<<blocks, 128, 0, stream>>>(m.n, m.pos_op, m.quat, m.lscale, m.sh, m.m_pos_op, m.v_pos_op, m.m_quat, m.v_quat, m.m_lscale, m.v_lscale, m.m_sh, m.v_sh, ctx.v_splat, ctx.vis_flag, ctx.tile_count, m.refine_norm, m.vis_count, cam, op)
+#define L(D) optim_kernel<D><<<blocks, 128, 0, stream>>>(m.n, m.pos_op, m.quat, m.lscale, m.sh, m.m_pos_op, m.v_pos_op, m.m_quat, m.v_quat, m.m_lscale, m.v_lscale, m.m_sh, m.v_sh, m.cap, ctx.v_splat, ctx.vis_flag, ctx.tile_count, m.refine_norm, m.vis_count, cam, op)
   switch (m.degree) { case 0: L(0); break; case 1: L(1); break; case 2: L(2); break; case 3: L(3); break; case 4: L(4); break; default: throw std::runtime_error("bad degree"); }
 #undef L
   CUDA_KERNEL_CHECK();

@@ -30,6 +30,7 @@ add_library(b2c_core STATIC
   src/gpu/binning.cu
   src/gpu/raster_fwd.cu
   src/gpu/raster_bwd.cu
+  src/gpu/raster_bwd_tc.cu
   src/gpu/loss.cu
   src/gpu/optim.cu
   src/gpu/refine.cu

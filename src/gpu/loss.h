@@ -23,6 +23,7 @@ struct LossParams {
   float match_alpha_weight = 0.1f;
   float scale = 1.f;                  // extra multiplier on the whole photometric loss (1 / coverage)
   float normal_scale = 0.f;           // normal_loss_weight * every / count, 0 = off
+  float grad_scale = 1.f;             // multiplies the per-pixel gradients (not the loss value)
 };
 
 // Fused L1 + SSIM (+ alpha lane) loss with per-pixel gradient into ctx.v_out. Adds loss to ctx.loss_accum[0].

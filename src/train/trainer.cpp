@@ -185,11 +185,13 @@ int train_main(const Config& cfg) {
     lp.alpha_lane = view.has_alpha && !view.masked && cfg.match_alpha_weight > 0.f;
     lp.match_alpha_weight = cfg.match_alpha_weight;
     lp.scale = (view.masked && cfg.normalize_masked_loss) ? 1.f / std::max(view.alpha_coverage, 0.01f) : 1.f;
+    const bool use_tc = cfg.backward == "tc";
+    lp.grad_scale = use_tc ? 3.f * (float)view.W * (float)view.H : 1.f;
     photometric_loss(ctx, view, lp, stream);
     if (normals_active) { lp.normal_scale = cfg.normal_loss_weight * (float)cfg.normal_loss_every / std::max(view.normal_count, 1.f); normal_loss(ctx, view, lp, stream); }
     accumulate_loss(ctx, stream);
     timer.mark("loss", stream);
-    rasterize_backward(ctx, model, rp, stream);
+    if (use_tc) rasterize_backward_tc(ctx, model, rp, lp.grad_scale, stream); else rasterize_backward(ctx, model, rp, stream);
     timer.mark("backward", stream);
 
     OptimParams op; op.cam = rp.cam; op.active_sh_degree = rp.sh_degree; op.t = ++model.adam_t;

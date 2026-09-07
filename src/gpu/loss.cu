@@ -141,7 +141,7 @@ __global__ void __launch_bounds__(TILE_PX) photometric_kernel(
       float M = wp * (lp.mask ? gt_a : 1.f) * norm;
       float sgn = p > g ? 1.f : (p < g ? -1.f : 0.f);
       float grad = M * lp.l1_w * sgn + acc[0] + 2.f * p * acc[1] - 2.f * acc[2] + g * acc[3] - acc[4];
-      v_out[(size_t)pix * 4 + c] = grad;
+      v_out[(size_t)pix * 4 + c] = grad * lp.grad_scale;
       if (c == 0) {
         float va = 0.f;
         if (lp.alpha_lane) {
@@ -149,7 +149,7 @@ __global__ void __launch_bounds__(TILE_PX) photometric_kernel(
           float da = pv.w - gt_a;
           float sa = da > 0.f ? 1.f : (da < 0.f ? -1.f : 0.f);
           float Ma = wp * lp.match_alpha_weight * lp.scale / ((float)W * (float)H);
-          va = Ma * sa;
+          va = Ma * sa * lp.grad_scale;
           loss_local += Ma * fabsf(da);
         }
         v_out[(size_t)pix * 4 + 3] = va;
@@ -168,7 +168,7 @@ __global__ void __launch_bounds__(TILE_PX) photometric_kernel(
 }
 
 __global__ void normal_loss_kernel(int npix, const float4* __restrict__ feat, const uint32_t* __restrict__ gtn, const uint8_t* __restrict__ weights,
-                                   float scale, float4* __restrict__ v_feat, float* __restrict__ loss_accum) {
+                                   float scale, float grad_scale, float4* __restrict__ v_feat, float* __restrict__ loss_accum) {
   int pix = blockIdx.x * blockDim.x + threadIdx.x;
   float loss = 0.f;
   if (pix < npix) {
@@ -189,9 +189,10 @@ __global__ void normal_loss_kernel(int npix, const float4* __restrict__ feat, co
       loss = k * (fabsf(px - gx) + fabsf(py - gy) + fabsf(pz - gz) + 1.f - cosv);
       float inv_plgl = 1.f / (pl * gl), pl3 = pl * pl * pl;
       auto sgn = [](float v) { return v > 0.f ? 1.f : (v < 0.f ? -1.f : 0.f); };
-      out.x = k * (sgn(px - gx) - gx * inv_plgl + px * dotpg / (pl3 * gl));
-      out.y = k * (sgn(py - gy) - gy * inv_plgl + py * dotpg / (pl3 * gl));
-      out.z = k * (sgn(pz - gz) - gz * inv_plgl + pz * dotpg / (pl3 * gl));
+      float kg = k * grad_scale;
+      out.x = kg * (sgn(px - gx) - gx * inv_plgl + px * dotpg / (pl3 * gl));
+      out.y = kg * (sgn(py - gy) - gy * inv_plgl + py * dotpg / (pl3 * gl));
+      out.z = kg * (sgn(pz - gz) - gz * inv_plgl + pz * dotpg / (pl3 * gl));
     }
     v_feat[pix] = out;
   }
@@ -278,7 +279,7 @@ void accumulate_loss(RenderCtx& ctx, cudaStream_t stream) { accumulate_kernel<<<
 
 void normal_loss(RenderCtx& ctx, const ViewGPU& view, const LossParams& lp, cudaStream_t stream) {
   int npix = ctx.W * ctx.H;
-  normal_loss_kernel<<<div_up(npix, 256), 256, 0, stream>>>(npix, ctx.out_feat, view.normals, view.weights, lp.normal_scale, ctx.v_feat, ctx.loss_accum.ptr + 1);
+  normal_loss_kernel<<<div_up(npix, 256), 256, 0, stream>>>(npix, ctx.out_feat, view.normals, view.weights, lp.normal_scale, lp.grad_scale, ctx.v_feat, ctx.loss_accum.ptr + 1);
   CUDA_KERNEL_CHECK();
 }
 
