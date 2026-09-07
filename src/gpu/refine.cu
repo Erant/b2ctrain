@@ -173,11 +173,38 @@ void RefineState::bake_min_scale(Model& m, cudaStream_t stream) {
   CUDA_KERNEL_CHECK();
 }
 
+namespace {
+__global__ void axis_kernel(int n, const float4* __restrict__ pos, int axis, float* __restrict__ out) {
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= n) return;
+  float4 p = pos[i];
+  float v = axis == 0 ? p.x : (axis == 1 ? p.y : p.z);
+  out[i] = isfinite(v) ? v : 0.f;
+}
+}  // namespace
+
 void RefineState::update_bounds(const Model& m, cudaStream_t stream) {
-  auto p = m.pos_op.download(m.n, stream);
-  std::vector<float> xyz((size_t)m.n * 3);
-  for (int i = 0; i < m.n; i++) { xyz[i * 3] = p[i].x; xyz[i * 3 + 1] = p[i].y; xyz[i * 3 + 2] = p[i].z; }
-  bounds = bounds_from_pos(xyz.data(), m.n, 0.8f);
+  int n = m.n;
+  if (n == 0) return;
+  keys.reserve(n); keys_sorted.reserve(n);
+  const float percentile = 0.8f;
+  size_t lo = (size_t)((1.f - percentile) / 2.f * n), hi = std::min<size_t>(n - 1, (size_t)((1.f + percentile) / 2.f * n));
+  h_bounds.reserve(8);
+  for (int a = 0; a < 3; a++) {
+    axis_kernel<<<div_up(n, 256), 256, 0, stream>>>(n, m.pos_op, a, keys);
+    CUDA_KERNEL_CHECK();
+    size_t tmp = 0;
+    cub::DeviceRadixSort::SortKeys(nullptr, tmp, keys.ptr, keys_sorted.ptr, n, 0, 32, stream);
+    cub_tmp.reserve(tmp);
+    cub::DeviceRadixSort::SortKeys(cub_tmp.ptr, tmp, keys.ptr, keys_sorted.ptr, n, 0, 32, stream);
+    CUDA_CHECK(cudaMemcpyAsync(h_bounds.ptr + a * 2, keys_sorted.ptr + lo, sizeof(float), cudaMemcpyDeviceToHost, stream));
+    CUDA_CHECK(cudaMemcpyAsync(h_bounds.ptr + a * 2 + 1, keys_sorted.ptr + hi, sizeof(float), cudaMemcpyDeviceToHost, stream));
+  }
+  CUDA_CHECK(cudaStreamSynchronize(stream));
+  for (int a = 0; a < 3; a++) {
+    bounds.min[a] = h_bounds.ptr[a * 2]; bounds.max[a] = h_bounds.ptr[a * 2 + 1];
+    bounds.center[a] = 0.5f * (bounds.min[a] + bounds.max[a]); bounds.extent[a] = bounds.max[a] - bounds.min[a];
+  }
 }
 
 namespace {

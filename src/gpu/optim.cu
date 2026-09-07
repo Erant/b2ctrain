@@ -100,7 +100,7 @@ template <int DEG>
 __global__ void __launch_bounds__(128) optim_kernel(
     int n, float4* __restrict__ pos_op, float4* __restrict__ quat, float4* __restrict__ lscale, float* __restrict__ sh,
     float4* __restrict__ m_pos, float4* __restrict__ v_pos, float4* __restrict__ m_q, float4* __restrict__ v_q, float4* __restrict__ m_ls, float4* __restrict__ v_ls,
-    float* __restrict__ m_sh, float* __restrict__ v_sh, int sh_stride,
+    float* __restrict__ m_sh, float* __restrict__ v_sh, int sh_stride, float4* __restrict__ sh_upd,
     float* __restrict__ v_splat, uint32_t* __restrict__ vis_flag, const uint32_t* __restrict__ tile_count,
     float* __restrict__ refine_norm, float* __restrict__ vis_count,
     CamDev cam, OptimParams op) {
@@ -128,9 +128,10 @@ __global__ void __launch_bounds__(128) optim_kernel(
 
   float4 po = pos_op[i], q = quat[i], ls = lscale[i];
   float3 g_pos = make_float3(0, 0, 0); float g_op = 0.f; float4 g_q = make_float4(0, 0, 0, 0); float3 g_ls = make_float3(0, 0, 0);
-  float g_sh[K * 3];
+  float basis[K];
 #pragma unroll
-  for (int k = 0; k < K * 3; k++) g_sh[k] = 0.f;
+  for (int k = 0; k < K; k++) basis[k] = 0.f;
+  float3 vc = make_float3(0.f, 0.f, 0.f);
   const float* shc = sh + i; const size_t stride = (size_t)sh_stride;
 
   if (any) {
@@ -140,13 +141,12 @@ __global__ void __launch_bounds__(128) optim_kernel(
       float3 campos = make_float3(cam.pos[0], cam.pos[1], cam.pos[2]);
       // SH
       float3 u = mean - campos; float ul = len3(u); float3 v = u * (1.f / ul);
-      float basis[K];
       sh_basis<DEG>(v, basis);
-      float3 vc = make_float3(g[5], g[6], g[7]);
+      vc = make_float3(g[5], g[6], g[7]);
+      {
+        int kmax = (op.active_sh_degree + 1) * (op.active_sh_degree + 1);
 #pragma unroll
-      for (int k = 0; k < K; k++) {
-        float bk = k > 0 && ((k >= 1 && op.active_sh_degree < 1) || (k >= 4 && op.active_sh_degree < 2) || (k >= 9 && op.active_sh_degree < 3) || (k >= 16 && op.active_sh_degree < 4)) ? 0.f : basis[k];
-        g_sh[k * 3] = bk * vc.x; g_sh[k * 3 + 1] = bk * vc.y; g_sh[k * 3 + 2] = bk * vc.z;
+        for (int k = 0; k < K; k++) if (k >= kmax) basis[k] = 0.f;
       }
       float3 v_v = sh_viewdir_vjp<DEG>(shc, stride, v, vc, op.active_sh_degree);
       float vdot = dot3(v, v_v);
@@ -217,14 +217,16 @@ __global__ void __launch_bounds__(128) optim_kernel(
       // feat = Rv * (face * u), u = Rq.col(axis)/|.|; d feat / d Rq.col(axis) = Rv * face * (I - u u^T)/|a|.
       if (g[10] != 0.f || g[11] != 0.f || g[12] != 0.f) {
         int axis = (ls.x <= ls.y && ls.x <= ls.z) ? 0 : (ls.y <= ls.z ? 1 : 2);
-        float3 a = make_float3(pr.Rq.m[axis], pr.Rq.m[3 + axis], pr.Rq.m[6 + axis]);
+        float3 a = axis == 0 ? make_float3(pr.Rq.m[0], pr.Rq.m[3], pr.Rq.m[6]) : (axis == 1 ? make_float3(pr.Rq.m[1], pr.Rq.m[4], pr.Rq.m[7]) : make_float3(pr.Rq.m[2], pr.Rq.m[5], pr.Rq.m[8]));
         float al = fmaxf(len3(a), 1e-12f); float3 uu = a * (1.f / al);
         float face = dot3(campos - mean, uu) >= 0.f ? 1.f : -1.f;
         float3 vf = make_float3(g[10], g[11], g[12]);
         float3 vu = mat3_tmul(Rv, vf) * face;          // d/d(u)
         float3 va = (vu - uu * dot3(uu, vu)) * (1.f / al);  // d/d(a)
         Mat3 vRn; for (int k = 0; k < 9; k++) vRn.m[k] = 0.f;
-        vRn.m[axis] = va.x; vRn.m[3 + axis] = va.y; vRn.m[6 + axis] = va.z;
+        if (axis == 0) { vRn.m[0] = va.x; vRn.m[3] = va.y; vRn.m[6] = va.z; }
+        else if (axis == 1) { vRn.m[1] = va.x; vRn.m[4] = va.y; vRn.m[7] = va.z; }
+        else { vRn.m[2] = va.x; vRn.m[5] = va.y; vRn.m[8] = va.z; }
         float4 qg2 = quat_to_mat_vjp(qn, vRn);
         float4 gq2 = apply_normalize_vjp(q, qg2);
         g_q.x += gq2.x; g_q.y += gq2.y; g_q.z += gq2.z; g_q.w += gq2.w;
@@ -237,7 +239,7 @@ __global__ void __launch_bounds__(128) optim_kernel(
   if (op.grad_out) {
     float* o = op.grad_out + (size_t)i * (11 + K * 3);
     o[0] = g_pos.x; o[1] = g_pos.y; o[2] = g_pos.z; o[3] = g_op; o[4] = g_q.x; o[5] = g_q.y; o[6] = g_q.z; o[7] = g_q.w; o[8] = g_ls.x; o[9] = g_ls.y; o[10] = g_ls.z;
-    for (int k = 0; k < K * 3; k++) o[11 + k] = g_sh[k];
+    for (int k = 0; k < K; k++) { o[11 + k * 3] = basis[k] * vc.x; o[12 + k * 3] = basis[k] * vc.y; o[13 + k * 3] = basis[k] * vc.z; }
     return;
   }
   // ---- Adam ----
@@ -262,17 +264,22 @@ __global__ void __launch_bounds__(128) optim_kernel(
   {
     float* msh = m_sh + i;
     float* shp = sh + i;
-    float gsq = 0.f;
+    float bsq = 0.f;
 #pragma unroll
-    for (int k = 0; k < K * 3; k++) gsq += g_sh[k] * g_sh[k];
-    gsq *= 1.f / (float)(K * 3);
+    for (int k = 0; k < K; k++) bsq += basis[k] * basis[k];
+    float gsq = bsq * (vc.x * vc.x + vc.y * vc.y + vc.z * vc.z) * (1.f / (float)(K * 3));
     float v = op.beta2 * v_sh[i] + (1.f - op.beta2) * gsq; v_sh[i] = v;
-    float denom = 1.f / (sqrtf(v * bc2) + op.eps);
+    float denom = bc1 / (sqrtf(v * bc2) + op.eps);
 #pragma unroll
-    for (int k = 0; k < K * 3; k++) {
-      float m = op.beta1 * msh[k * stride] + (1.f - op.beta1) * g_sh[k]; msh[k * stride] = m;
-      float lr = k < 3 ? op.lr_dc : op.lr_sh_rest;
-      shp[k * stride] -= lr * (m * bc1) * denom;
+    for (int k = 0; k < K; k++) {
+      float lr = (k == 0 ? op.lr_dc : op.lr_sh_rest) * denom;
+      float gk[3] = {basis[k] * vc.x, basis[k] * vc.y, basis[k] * vc.z};
+#pragma unroll
+      for (int ch = 0; ch < 3; ch++) {
+        size_t o = (size_t)(k * 3 + ch) * stride;
+        float m = op.beta1 * msh[o] + (1.f - op.beta1) * gk[ch]; msh[o] = m;
+        shp[o] -= lr * m;
+      }
     }
   }
   // ---- MCMC noise on means ----
@@ -293,13 +300,38 @@ __global__ void __launch_bounds__(128) optim_kernel(
   pos_op[i] = po;
 }
 
+// SH Adam update, one thread per (lane j, splat i), i fastest. blockIdx.y = lane.
+template <int DEG>
+__global__ void __launch_bounds__(256) sh_update_kernel(int n, const float4* __restrict__ pos_op, const float4* __restrict__ sh_upd,
+                                                        float* __restrict__ sh, float* __restrict__ m_sh, int stride, float3 campos, OptimParams op) {
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= n) return;
+  int j = blockIdx.y, k = j / 3, ch = j - k * 3;
+  float4 u = sh_upd[i];
+  if (u.w == 0.f) return;  // skipped (sparse) — moments untouched
+  float g = 0.f;
+  if (u.x != 0.f || u.y != 0.f || u.z != 0.f) {
+    float4 po = pos_op[i];
+    float3 d = make_float3(po.x - campos.x, po.y - campos.y, po.z - campos.z);
+    float3 v = d * (1.f / fmaxf(len3(d), 1e-12f));
+    float b = sh_basis_k(v, k);
+    if (k >= (op.active_sh_degree + 1) * (op.active_sh_degree + 1)) b = 0.f;
+    g = b * (ch == 0 ? u.x : (ch == 1 ? u.y : u.z));
+  }
+  size_t o = (size_t)j * stride + i;
+  float m = op.beta1 * m_sh[o] + (1.f - op.beta1) * g; m_sh[o] = m;
+  float lr = k == 0 ? op.lr_dc : op.lr_sh_rest;
+  sh[o] -= lr * m * u.w;
+}
+
 }  // namespace
 
 void optimizer_step(RenderCtx& ctx, Model& m, const OptimParams& op, cudaStream_t stream) {
   if (m.n == 0) return;
   CamDev cam = to_camdev(op.cam);
   int blocks = div_up(m.n, 128);
-#define L(D) optim_kernel<D><<<blocks, 128, 0, stream>>>(m.n, m.pos_op, m.quat, m.lscale, m.sh, m.m_pos_op, m.v_pos_op, m.m_quat, m.v_quat, m.m_lscale, m.v_lscale, m.m_sh, m.v_sh, m.cap, ctx.v_splat, ctx.vis_flag, ctx.tile_count, m.refine_norm, m.vis_count, cam, op)
+  ctx.sh_upd.reserve((size_t)m.cap);
+#define L(D) optim_kernel<D><<<blocks, 128, 0, stream>>>(m.n, m.pos_op, m.quat, m.lscale, m.sh, m.m_pos_op, m.v_pos_op, m.m_quat, m.v_quat, m.m_lscale, m.v_lscale, m.m_sh, m.v_sh, m.cap, ctx.sh_upd, ctx.v_splat, ctx.vis_flag, ctx.tile_count, m.refine_norm, m.vis_count, cam, op)
   switch (m.degree) { case 0: L(0); break; case 1: L(1); break; case 2: L(2); break; case 3: L(3); break; case 4: L(4); break; default: throw std::runtime_error("bad degree"); }
 #undef L
   CUDA_KERNEL_CHECK();

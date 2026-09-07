@@ -6,18 +6,18 @@ namespace b2c {
 namespace {
 
 template <bool FEAT, bool BWD>
-__global__ void __launch_bounds__(TILE_PX) raster_fwd_kernel(
+__global__ void __launch_bounds__(RT_PX) raster_fwd_kernel(
     uint2* __restrict__ tile_ranges, const uint32_t* __restrict__ sorted_vals,
     const float4* __restrict__ proj0, const float4* __restrict__ proj1, const float4* __restrict__ proj2, const float2* __restrict__ proj3,
     int W, int H, int tiles_x, float3 bg,
     float4* __restrict__ out_rgba, float4* __restrict__ out_feat, uint32_t* __restrict__ last_idx) {
-  __shared__ float4 s0[TILE_PX], s1[TILE_PX], s2[TILE_PX];
-  __shared__ float2 s3[TILE_PX];
+  __shared__ float4 s0[RT_PX], s1[RT_PX], s2[RT_PX];
+  __shared__ float2 s3[RT_PX];
   __shared__ uint32_t s_max_last;
   const int tile = blockIdx.x;
   const int tx = tile % tiles_x, ty = tile / tiles_x;
-  const int lx = threadIdx.x % TILE_W, ly = threadIdx.x / TILE_W;
-  const int px = tx * TILE_W + lx, py = ty * TILE_W + ly;
+  const int lx = threadIdx.x % RT_W, ly = threadIdx.x / RT_W;
+  const int px = tx * RT_W + lx, py = ty * RT_W + ly;
   const bool inside = px < W && py < H;
   const float pcx = px + 0.5f, pcy = py + 0.5f;
   uint2 range = tile_ranges[tile];
@@ -25,9 +25,9 @@ __global__ void __launch_bounds__(TILE_PX) raster_fwd_kernel(
   float T = 1.f, r = 0.f, g = 0.f, b = 0.f, f0 = 0.f, f1 = 0.f, f2 = 0.f;
   bool done = !inside;
   uint32_t last = range.x;
-  for (uint32_t start = range.x; start < range.y; start += TILE_PX) {
-    if (__syncthreads_count(done) == TILE_PX) break;
-    uint32_t remaining = min((uint32_t)TILE_PX, range.y - start);
+  for (uint32_t start = range.x; start < range.y; start += RT_PX) {
+    if (__syncthreads_count(done) == RT_PX) break;
+    uint32_t remaining = min((uint32_t)RT_PX, range.y - start);
     if (threadIdx.x < remaining) {
       uint32_t gid = sorted_vals[start + threadIdx.x];
       s0[threadIdx.x] = proj0[gid]; s1[threadIdx.x] = proj1[gid]; s2[threadIdx.x] = proj2[gid];
@@ -38,8 +38,9 @@ __global__ void __launch_bounds__(TILE_PX) raster_fwd_kernel(
       float4 a = s0[t]; float4 c = s1[t];
       float dx = pcx - a.x, dy = pcy - a.y;
       float sigma = 0.5f * (a.z * dx * dx + c.x * dy * dy) + a.w * dx * dy;
+      if (sigma < 0.f || sigma > c.w) continue;  // alpha < 1/255: cannot contribute
       float alpha = fminf(ALPHA_MAX, c.y * __expf(-sigma));
-      if (sigma >= 0.f && alpha >= ALPHA_CUTOFF) {
+      {
         float next_T = T * (1.f - alpha);
         if (next_T <= T_CUTOFF) { done = true; break; }
         float vis = alpha * T;
@@ -69,7 +70,7 @@ __global__ void __launch_bounds__(TILE_PX) raster_fwd_kernel(
 void rasterize_forward(RenderCtx& ctx, const RenderParams& p, cudaStream_t stream) {
   float3 bg = make_float3(p.bg[0], p.bg[1], p.bg[2]);
   bool feat = p.feat != FeatureMode::None;
-  dim3 grid(ctx.n_tiles), block(TILE_PX);
+  dim3 grid(ctx.n_tiles), block(RT_PX);
 #define L(F, B) raster_fwd_kernel<F, B><<<grid, block, 0, stream>>>(ctx.tile_ranges, ctx.vals_sorted, ctx.proj0, ctx.proj1, ctx.proj2, ctx.proj3, ctx.W, ctx.H, ctx.tiles_x, bg, ctx.out_rgba, ctx.out_feat, ctx.last_idx)
   if (feat) { if (p.bwd_info) L(true, true); else L(true, false); }
   else { if (p.bwd_info) L(false, true); else L(false, false); }

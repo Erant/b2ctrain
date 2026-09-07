@@ -26,6 +26,7 @@ struct RefineState {
   DevBuf<unsigned char> cub_tmp;
   DevBuf<uint32_t> counts;
   PinnedBuf<uint32_t> h_counts;
+  PinnedBuf<float> h_bounds;
   int refine_count = 0;
 
   void init(const Model& m, cudaStream_t stream);

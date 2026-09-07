@@ -13,8 +13,10 @@ namespace b2c {
   throw std::runtime_error(std::string("CUDA error ") + cudaGetErrorString(_e) + " at " + __FILE__ + ":" + std::to_string(__LINE__)); } } while (0)
 #define CUDA_KERNEL_CHECK() CUDA_CHECK(cudaGetLastError())
 
-constexpr int TILE_W = 16;
+constexpr int TILE_W = 16;                 // loss / SSIM tile
 constexpr int TILE_PX = TILE_W * TILE_W;
+constexpr int RT_W = 8;                    // rasterizer tile
+constexpr int RT_PX = RT_W * RT_W;
 constexpr int PROJ_BLOCK = 256;
 
 inline int div_up(size_t a, int b) { return (int)((a + b - 1) / b); }

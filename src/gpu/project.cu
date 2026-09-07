@@ -21,8 +21,8 @@ __global__ void project_kernel(int n, const float4* __restrict__ pos_op, const f
   uint32_t hits = 0;
   for (int ty = bb.min_y; ty < bb.max_y; ty++)
     for (int tx = bb.min_x; tx < bb.max_x; tx++) {
-      float rx = tx * (float)TILE_W, ry = ty * (float)TILE_W;
-      if (tile_hit(rx, ry, rx + TILE_W, ry + TILE_W, pr.mean2d.x, pr.mean2d.y, pr.conic, power)) hits++;
+      float rx = tx * (float)RT_W, ry = ty * (float)RT_W;
+      if (tile_hit(rx, ry, rx + RT_W, ry + RT_W, pr.mean2d.x, pr.mean2d.y, pr.conic, power)) hits++;
     }
   tile_count[i] = hits;
   float3 mean = make_float3(po.x, po.y, po.z);
@@ -40,7 +40,7 @@ __global__ void project_kernel(int n, const float4* __restrict__ pos_op, const f
   if constexpr (FEAT == 1) {
     // Pseudo-normal: shortest-scale local axis of R(q), camera-facing, in camera space.
     int axis = (ls.x <= ls.y && ls.x <= ls.z) ? 0 : (ls.y <= ls.z ? 1 : 2);
-    float3 a = make_float3(pr.Rq.m[axis], pr.Rq.m[3 + axis], pr.Rq.m[6 + axis]);
+    float3 a = axis == 0 ? make_float3(pr.Rq.m[0], pr.Rq.m[3], pr.Rq.m[6]) : (axis == 1 ? make_float3(pr.Rq.m[1], pr.Rq.m[4], pr.Rq.m[7]) : make_float3(pr.Rq.m[2], pr.Rq.m[5], pr.Rq.m[8]));
     float al = fmaxf(len3(a), 1e-12f);
     float3 u = a * (1.f / al);
     float face = dot3(campos - mean, u) >= 0.f ? 1.f : -1.f;
@@ -53,7 +53,7 @@ __global__ void project_kernel(int n, const float4* __restrict__ pos_op, const f
     feat.z = isfinite(feat.z) ? fminf(fmaxf(feat.z, -100.f), 100.f) : 0.f;
   }
   proj0[i] = make_float4(pr.mean2d.x, pr.mean2d.y, pr.conic.c00, pr.conic.c01);
-  proj1[i] = make_float4(pr.conic.c11, pr.opac, pr.mean_c.z, fmaxf(pr.ex / (float)cam.W, pr.ey / (float)cam.H));
+  proj1[i] = make_float4(pr.conic.c11, pr.opac, pr.mean_c.z, power);
   proj2[i] = make_float4(cr, cg, cb, feat.x);
   proj3[i] = make_float2(feat.y, feat.z);
   float ms = fmaxf(pr.ex / (float)cam.W, pr.ey / (float)cam.H);

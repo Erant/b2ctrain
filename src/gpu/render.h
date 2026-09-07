@@ -40,9 +40,11 @@ struct RenderParams {
 struct RenderCtx {
   int W = 0, H = 0, tiles_x = 0, tiles_y = 0, n_tiles = 0, tile_bits = 0, depth_bits = 0;
   // per-splat (global index)
-  DevBuf<float4> proj0, proj1, proj2;   // (xy, c00, c01) | (c11, opac, depth, radius_frac) | (r, g, b, feat_x)
+  DevBuf<float4> proj0, proj1, proj2;   // (xy, c00, c01) | (c11, opac, depth, power = ln(255 opac)) | (r, g, b, feat_x)
   DevBuf<float2> proj3;                 // (feat_y, feat_z)
-  DevBuf<uint32_t> tile_count, tile_off;  // per-splat hit count, inclusive scan
+  DevBuf<uint32_t> tile_count, tile_off;  // per-splat hit count, inclusive scan (in depth order)
+  DevBuf<uint32_t> depth_keys, depth_keys_sorted, order_in, order;  // per-splat depth sort
+  DevBuf<uint32_t> count_perm;            // tile_count permuted into depth order
   // intersections
   DevBuf<uint32_t> keys, vals, keys_sorted, vals_sorted;
   size_t isect_cap = 0;
@@ -60,6 +62,7 @@ struct RenderCtx {
   DevBuf<float4> v_out;       // dL/d(rgba) per pixel
   DevBuf<float4> v_feat;      // dL/d(feat) per pixel
   DevBuf<float> loss_accum;   // [8] scalar accumulators
+  DevBuf<float4> sh_upd;      // [n] per-splat (dL/dcolour, adam denom) for the SH update kernel
 
   void setup(int W, int H, int n_splats, cudaStream_t stream);
 };

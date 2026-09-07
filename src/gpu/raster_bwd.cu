@@ -8,25 +8,25 @@ namespace {
 // Per-pixel-parallel backward: reverse replay of the forward compositing, per-splat gradients reduced across the
 // tile with warp shuffles into shared accumulators, then one global atomicAdd per lane per splat per tile.
 template <bool FEAT>
-__global__ void __launch_bounds__(TILE_PX) raster_bwd_kernel(
+__global__ void __launch_bounds__(RT_PX) raster_bwd_kernel(
     const uint2* __restrict__ tile_ranges, const uint32_t* __restrict__ sorted_vals,
     const float4* __restrict__ proj0, const float4* __restrict__ proj1, const float4* __restrict__ proj2, const float2* __restrict__ proj3,
     const float4* __restrict__ out_rgba, const float4* __restrict__ out_feat, const uint32_t* __restrict__ last_idx,
     const float4* __restrict__ v_out, const float4* __restrict__ v_feat_in,
     int W, int H, int tiles_x, float3 bg,
     float* __restrict__ v_splat, uint32_t* __restrict__ vis_flag) {
-  __shared__ float4 s0[TILE_PX], s1[TILE_PX], s2[TILE_PX];
-  __shared__ float2 s3[TILE_PX];
-  __shared__ uint32_t s_gid[TILE_PX];
-  __shared__ float s_grad[TILE_PX][GRAD_LANES];
-  __shared__ uint32_t s_vis[TILE_PX];
+  __shared__ float4 s0[RT_PX], s1[RT_PX], s2[RT_PX];
+  __shared__ float2 s3[RT_PX];
+  __shared__ uint32_t s_gid[RT_PX];
+  __shared__ float s_grad[RT_PX][GRAD_LANES];
+  __shared__ uint32_t s_vis[RT_PX];
 
   const int tile = blockIdx.x;
   const uint2 range = tile_ranges[tile];
   if (range.y <= range.x) return;
   const int tx = tile % tiles_x, ty = tile / tiles_x;
-  const int lx = threadIdx.x % TILE_W, ly = threadIdx.x / TILE_W;
-  const int px = tx * TILE_W + lx, py = ty * TILE_W + ly;
+  const int lx = threadIdx.x % RT_W, ly = threadIdx.x / RT_W;
+  const int px = tx * RT_W + lx, py = ty * RT_W + ly;
   const bool inside = px < W && py < H;
   const float pcx = px + 0.5f, pcy = py + 0.5f;
   const int pix = inside ? py * W + px : 0;
@@ -47,7 +47,7 @@ __global__ void __launch_bounds__(TILE_PX) raster_bwd_kernel(
   const float Wf = (float)W, Hf = (float)H;
 
   for (uint32_t batch_end = range.y; batch_end > range.x; ) {
-    uint32_t batch_start = batch_end > range.x + TILE_PX ? batch_end - TILE_PX : range.x;
+    uint32_t batch_start = batch_end > range.x + RT_PX ? batch_end - RT_PX : range.x;
     uint32_t count = batch_end - batch_start;
     __syncthreads();  // previous batch's shared use complete
     if (threadIdx.x < count) {
@@ -70,10 +70,10 @@ __global__ void __launch_bounds__(TILE_PX) raster_bwd_kernel(
         float4 a = s0[j]; float4 c = s1[j];
         float dx = pcx - a.x, dy = pcy - a.y;
         float sigma = 0.5f * (a.z * dx * dx + c.x * dy * dy) + a.w * dx * dy;
-        float gauss = __expf(-sigma);
-        float alpha = fminf(ALPHA_MAX, c.y * gauss);
-        contrib = sigma >= 0.f && alpha >= ALPHA_CUTOFF;
+        contrib = sigma >= 0.f && sigma <= c.w;
         if (contrib) {
+          float gauss = __expf(-sigma);
+          float alpha = fminf(ALPHA_MAX, c.y * gauss);
           float ra = 1.f / (1.f - alpha);
           float T_before = T * ra;
           float vis = alpha * T_before;
@@ -135,7 +135,7 @@ __global__ void __launch_bounds__(TILE_PX) raster_bwd_kernel(
 
 void rasterize_backward(RenderCtx& ctx, const Model& m, const RenderParams& p, cudaStream_t stream) {
   float3 bg = make_float3(p.bg[0], p.bg[1], p.bg[2]);
-  dim3 grid(ctx.n_tiles), block(TILE_PX);
+  dim3 grid(ctx.n_tiles), block(RT_PX);
   if (p.feat != FeatureMode::None)
     raster_bwd_kernel<true><<<grid, block, 0, stream>>>(ctx.tile_ranges, ctx.vals_sorted, ctx.proj0, ctx.proj1, ctx.proj2, ctx.proj3, ctx.out_rgba, ctx.out_feat, ctx.last_idx, ctx.v_out, ctx.v_feat, ctx.W, ctx.H, ctx.tiles_x, bg, ctx.v_splat, ctx.vis_flag);
   else

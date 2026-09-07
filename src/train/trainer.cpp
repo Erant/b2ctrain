@@ -120,6 +120,7 @@ int train_main(const Config& cfg) {
   double t0 = now_seconds(), t_report = t0, t_loss = t0;
   float last_loss = 0.f; uint32_t last_report_iter = 0; double last_report_time = t0;
   double step_time_accum = 0;
+  double isect_sum = 0; uint32_t isect_max = 0;
   uint32_t step = cfg.start_iter;
 
   auto do_export = [&](uint32_t iter, bool final_export) {
@@ -174,6 +175,7 @@ int train_main(const Config& cfg) {
     rp.bwd_info = true;
     if (view.W != ctx.W || view.H != ctx.H) ctx.setup(view.W, view.H, model.cap, stream);
     render_forward(ctx, model, rp, stream);
+    isect_sum += ctx.num_isect; isect_max = std::max(isect_max, ctx.num_isect);
     timer.mark("forward", stream);
 
     ctx.loss_accum.zero(stream, 4);
@@ -260,6 +262,7 @@ int train_main(const Config& cfg) {
   log_info("Training took %s (%.1f it/s)", format_duration(train_time).c_str(), (total - cfg.start_iter) / std::max(train_time, 1e-9));
   do_export(total, true);
   if (cfg.bench) {
+    log_info("  intersections/step: avg %.0f, max %u", isect_sum / std::max(1u, total - cfg.start_iter), isect_max);
     double sum = 0; for (auto& [n, ms] : timer.totals) sum += ms;
     for (auto& [n, ms] : timer.totals) log_info("  %-10s %8.1f ms total  %6.3f ms/step  %5.1f%%", n.c_str(), ms, ms / std::max(1u, total - cfg.start_iter), 100.0 * ms / sum);
   }

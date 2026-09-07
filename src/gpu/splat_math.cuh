@@ -35,7 +35,7 @@ __device__ __forceinline__ bool tile_hit(float rmin_x, float rmin_y, float rmax_
 
 struct TileBox { int min_x, min_y, max_x, max_y; };
 __device__ __forceinline__ TileBox tile_bbox(float mx, float my, float ex, float ey, int tiles_x, int tiles_y) {
-  float tw = (float)TILE_W;
+  float tw = (float)RT_W;
   float cx = mx / tw, cy = my / tw, dx = ex / tw, dy = ey / tw;
   TileBox b;
   b.min_x = (int)fminf(fmaxf(cx - dx, 0.f), (float)tiles_x);
@@ -125,6 +125,50 @@ __device__ __forceinline__ void sh_basis(float3 v, float* b) {
         }
       }
     }
+  }
+}
+
+// Single SH basis value for coefficient k (k uniform across the warp; deg gates the maximum).
+__device__ __forceinline__ float sh_basis_k(float3 v, int k) {
+  float x = v.x, y = v.y, z = v.z;
+  if (k == 0) return SH_C0_DEV;
+  if (k < 4) return k == 1 ? -0.4886025f * y : (k == 2 ? 0.4886025f * z : -0.4886025f * x);
+  float z2 = z * z, fc1 = x * x - y * y, fs1 = 2.f * x * y;
+  if (k < 9) {
+    switch (k) {
+      case 4: return 0.54627424f * fs1;
+      case 5: return -1.0925485f * z * y;
+      case 6: return 0.9461747f * z2 - 0.31539157f;
+      case 7: return -1.0925485f * z * x;
+      default: return 0.54627424f * fc1;
+    }
+  }
+  float fc2 = x * fc1 - y * fs1, fs2 = x * fs1 + y * fc1;
+  float f0c = -2.285229f * z2 + 0.4570458f, f1b = 1.4453057f * z;
+  float p12 = z * (1.8658817f * z2 - 1.119529f), p6 = 0.9461747f * z2 - 0.31539157f;
+  if (k < 16) {
+    switch (k) {
+      case 9: return -0.5900436f * fs2;
+      case 10: return f1b * fs1;
+      case 11: return f0c * y;
+      case 12: return p12;
+      case 13: return f0c * x;
+      case 14: return f1b * fc1;
+      default: return -0.5900436f * fc2;
+    }
+  }
+  float fc3 = x * fc2 - y * fs2, fs3 = x * fs2 + y * fc2;
+  float f0d = z * (-4.683326f * z2 + 2.0071396f), f1c = 3.3116114f * z2 - 0.47308735f, f2b = -1.7701308f * z, f3a = 0.62583575f;
+  switch (k) {
+    case 16: return f3a * fs3;
+    case 17: return f2b * fs2;
+    case 18: return f1c * fs1;
+    case 19: return f0d * y;
+    case 20: return 1.9843135f * z * p12 - 1.0062306f * p6;
+    case 21: return f0d * x;
+    case 22: return f1c * fc1;
+    case 23: return f2b * fc2;
+    default: return f3a * fc3;
   }
 }
 

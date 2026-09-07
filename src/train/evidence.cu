@@ -12,21 +12,21 @@ __device__ __forceinline__ float gt_ch(uint32_t p, int c) { return (float)((p >>
 
 // Forward replay per tile accumulating vis * (m, m*res, k) per splat.
 template <bool FEAT>
-__global__ void __launch_bounds__(TILE_PX) evidence_kernel(
+__global__ void __launch_bounds__(RT_PX) evidence_kernel(
     const uint2* __restrict__ tile_ranges, const uint32_t* __restrict__ sorted_vals,
     const float4* __restrict__ proj0, const float4* __restrict__ proj1, const float4* __restrict__ proj2, const float2* __restrict__ proj3,
     const float4* __restrict__ out_rgba, const float4* __restrict__ out_feat, const uint32_t* __restrict__ last_idx,
     const uint32_t* __restrict__ gt, const uint32_t* __restrict__ gtn, const uint8_t* __restrict__ weights,
     int W, int H, int tiles_x, bool masked_has_alpha, float normal_weight, float* __restrict__ acc) {
-  __shared__ float4 s0[TILE_PX], s1[TILE_PX];
-  __shared__ uint32_t s_gid[TILE_PX];
-  __shared__ float s_acc[TILE_PX][3];
+  __shared__ float4 s0[RT_PX], s1[RT_PX];
+  __shared__ uint32_t s_gid[RT_PX];
+  __shared__ float s_acc[RT_PX][3];
   const int tile = blockIdx.x;
   const uint2 range = tile_ranges[tile];
   if (range.y <= range.x) return;
   const int tx = tile % tiles_x, ty = tile / tiles_x;
-  const int lx = threadIdx.x % TILE_W, ly = threadIdx.x / TILE_W;
-  const int px = tx * TILE_W + lx, py = ty * TILE_W + ly;
+  const int lx = threadIdx.x % RT_W, ly = threadIdx.x / RT_W;
+  const int px = tx * RT_W + lx, py = ty * RT_W + ly;
   const bool inside = px < W && py < H;
   const float pcx = px + 0.5f, pcy = py + 0.5f;
   const int lane = threadIdx.x & 31;
@@ -54,9 +54,9 @@ __global__ void __launch_bounds__(TILE_PX) evidence_kernel(
     last = last_idx[pix];
   }
   float T = 1.f; bool done = !inside;
-  for (uint32_t start = range.x; start < range.y; start += TILE_PX) {
-    if (__syncthreads_count(done) == TILE_PX) break;
-    uint32_t remaining = min((uint32_t)TILE_PX, range.y - start);
+  for (uint32_t start = range.x; start < range.y; start += RT_PX) {
+    if (__syncthreads_count(done) == RT_PX) break;
+    uint32_t remaining = min((uint32_t)RT_PX, range.y - start);
     if (threadIdx.x < remaining) {
       uint32_t gid = sorted_vals[start + threadIdx.x];
       s_gid[threadIdx.x] = gid; s0[threadIdx.x] = proj0[gid]; s1[threadIdx.x] = proj1[gid];
@@ -69,8 +69,7 @@ __global__ void __launch_bounds__(TILE_PX) evidence_kernel(
         float4 a = s0[t]; float4 c = s1[t];
         float dx = pcx - a.x, dy = pcy - a.y;
         float sigma = 0.5f * (a.z * dx * dx + c.x * dy * dy) + a.w * dx * dy;
-        float alpha = fminf(ALPHA_MAX, c.y * __expf(-sigma));
-        if (sigma >= 0.f && alpha >= ALPHA_CUTOFF) { vis = alpha * T; T *= (1.f - alpha); }
+        if (sigma >= 0.f && sigma <= c.w) { float alpha = fminf(ALPHA_MAX, c.y * __expf(-sigma)); vis = alpha * T; T *= (1.f - alpha); }
       }
       unsigned ballot = __ballot_sync(0xffffffffu, vis != 0.f);
       if (ballot) {
@@ -118,7 +117,7 @@ void compute_evidence(RenderCtx& ctx, const Model& m, const std::vector<ViewGPU>
     render_forward(ctx, m, rp, stream);
     g_view_acc.zero(stream);
     bool masked_alpha = view.masked && view.has_alpha;
-    dim3 grid(ctx.n_tiles), block(TILE_PX);
+    dim3 grid(ctx.n_tiles), block(RT_PX);
     if (rp.feat == FeatureMode::Normals)
       evidence_kernel<true><<<grid, block, 0, stream>>>(ctx.tile_ranges, ctx.vals_sorted, ctx.proj0, ctx.proj1, ctx.proj2, ctx.proj3, ctx.out_rgba, ctx.out_feat, ctx.last_idx, view.rgba, view.normals, view.weights, ctx.W, ctx.H, ctx.tiles_x, masked_alpha, cfg.evidence_normal_weight, g_view_acc);
     else

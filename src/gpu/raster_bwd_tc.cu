@@ -17,9 +17,9 @@ constexpr int NB = 16;             // basis columns (N)
 constexpr float R_SCALE = 1.f / 64.f;
 
 struct SmemLayout {
-  static constexpr size_t A = (size_t)NTYPES * GROUP * TILE_PX * sizeof(__half);  // 32768
-  static constexpr size_t B = (size_t)TILE_PX * NB * sizeof(__half);              // 8192
-  static constexpr size_t C = (size_t)8 * GROUP * NB * sizeof(float);             // 8192 (8 warp partials)
+  static constexpr size_t A = (size_t)NTYPES * GROUP * RT_PX * sizeof(__half);  // 32768
+  static constexpr size_t B = (size_t)RT_PX * NB * sizeof(__half);              // 8192
+  static constexpr size_t C = (size_t)NTYPES * GROUP * NB * sizeof(float);        // 4096
   static constexpr size_t S0 = (size_t)BATCH * sizeof(float4) * 3;                // 3072
   static constexpr size_t S3 = (size_t)BATCH * sizeof(float2);                    // 512
   static constexpr size_t G = (size_t)BATCH * sizeof(uint32_t);                   // 256
@@ -27,7 +27,7 @@ struct SmemLayout {
 };
 
 template <bool FEAT>
-__global__ void __launch_bounds__(TILE_PX, 2) raster_bwd_tc_kernel(
+__global__ void __launch_bounds__(RT_PX) raster_bwd_tc_kernel(
     const uint2* __restrict__ tile_ranges, const uint32_t* __restrict__ sorted_vals,
     const float4* __restrict__ proj0, const float4* __restrict__ proj1, const float4* __restrict__ proj2, const float2* __restrict__ proj3,
     const float4* __restrict__ out_rgba, const float4* __restrict__ out_feat, const uint32_t* __restrict__ last_idx,
@@ -35,9 +35,9 @@ __global__ void __launch_bounds__(TILE_PX, 2) raster_bwd_tc_kernel(
     int W, int H, int tiles_x, float3 bg, float inv_gscale,
     float* __restrict__ v_splat, uint32_t* __restrict__ vis_flag) {
   extern __shared__ __align__(128) unsigned char smem[];
-  __half* A = (__half*)smem;                                   // [NTYPES][GROUP][TILE_PX]
-  __half* Bm = (__half*)(smem + SmemLayout::A);                // [TILE_PX][NB]
-  float* Cp = (float*)(smem + SmemLayout::A + SmemLayout::B);  // [8][GROUP][NB]
+  __half* A = (__half*)smem;                                   // [NTYPES][GROUP][RT_PX]
+  __half* Bm = (__half*)(smem + SmemLayout::A);                // [RT_PX][NB]
+  float* Cp = (float*)(smem + SmemLayout::A + SmemLayout::B);  // [NTYPES][GROUP][NB]
   float4* s0 = (float4*)(smem + SmemLayout::A + SmemLayout::B + SmemLayout::C);
   float4* s1 = s0 + BATCH; float4* s2 = s1 + BATCH;
   float2* s3 = (float2*)(s2 + BATCH);
@@ -47,11 +47,11 @@ __global__ void __launch_bounds__(TILE_PX, 2) raster_bwd_tc_kernel(
   const uint2 range = tile_ranges[tile];
   if (range.y <= range.x) return;
   const int tx = tile % tiles_x, ty = tile / tiles_x;
-  const int lx = threadIdx.x % TILE_W, ly = threadIdx.x / TILE_W;
-  const int px = tx * TILE_W + lx, py = ty * TILE_W + ly;
+  const int lx = threadIdx.x % RT_W, ly = threadIdx.x / RT_W;
+  const int px = tx * RT_W + lx, py = ty * RT_W + ly;
   const bool inside = px < W && py < H;
-  const float ox = tx * TILE_W + 8.f, oy = ty * TILE_W + 8.f;   // local origin (tile centre)
-  const float u = lx + 0.5f - 8.f, v = ly + 0.5f - 8.f;
+  const float ox = tx * RT_W + RT_W * 0.5f, oy = ty * RT_W + RT_W * 0.5f;   // local origin (tile centre)
+  const float u = lx + 0.5f - RT_W * 0.5f, v = ly + 0.5f - RT_W * 0.5f;
   const int pix = inside ? py * W + px : 0;
   const int warp = threadIdx.x >> 5;
 
@@ -91,19 +91,27 @@ __global__ void __launch_bounds__(TILE_PX, 2) raster_bwd_tc_kernel(
     for (int g = ngroups - 1; g >= 0; g--) {
       int gbase = g * GROUP;
       int gcount = min(GROUP, (int)count - gbase);
+      // Zero the scalar matrices (only contributing fragments write).
+      {
+        uint4* Az = (uint4*)A;
+        constexpr int NZ = (int)(SmemLayout::A / sizeof(uint4) / RT_PX);
+#pragma unroll
+        for (int z = 0; z < NZ; z++) Az[z * RT_PX + threadIdx.x] = make_uint4(0, 0, 0, 0);
+      }
+      __syncthreads();
       // Per-pixel reverse replay over this group's splats.
-      for (int j = GROUP - 1; j >= 0; j--) {
-        float s_vis = 0.f, s_va = 0.f, s_vs = 0.f, s_r = 0.f;
-        if (j < gcount) {
+      for (int j = gcount - 1; j >= 0; j--) {
+        {
           uint32_t idx = batch_start + gbase + j;
           int sj = gbase + j;
           if (inside && idx < last) {
             float4 a = s0[sj]; float4 c = s1[sj];
             float dx = px + 0.5f - a.x, dy = py + 0.5f - a.y;
             float sigma = 0.5f * (a.z * dx * dx + c.x * dy * dy) + a.w * dx * dy;
-            float gauss = __expf(-sigma);
-            float alpha = fminf(ALPHA_MAX, c.y * gauss);
-            if (sigma >= 0.f && alpha >= ALPHA_CUTOFF) {
+            if (sigma >= 0.f && sigma <= c.w) {
+              float gauss = __expf(-sigma);
+              float alpha = fminf(ALPHA_MAX, c.y * gauss);
+              float s_va = 0.f, s_vs = 0.f, s_r = 0.f;
               float ra = 1.f / (1.f - alpha);
               float T_before = T * ra;
               float vis = alpha * T_before;
@@ -116,7 +124,6 @@ __global__ void __launch_bounds__(TILE_PX, 2) raster_bwd_tc_kernel(
                 v_alpha += (T_before * fx - Sf.x * ra) * vf.x + (T_before * fy - Sf.y * ra) * vf.y + (T_before * fz - Sf.z * ra) * vf.z;
               }
               float v_sigma = -alpha * v_alpha;
-              s_vis = vis;
               if (c.y * gauss <= ALPHA_MAX) {
                 s_va = v_alpha * gauss; s_vs = v_sigma;
                 float vxy_x = -v_sigma * (a.z * dx + a.w * dy), vxy_y = -v_sigma * (a.w * dx + c.x * dy);
@@ -125,38 +132,42 @@ __global__ void __launch_bounds__(TILE_PX, 2) raster_bwd_tc_kernel(
               S.x += cr * vis; S.y += cg * vis; S.z += cb * vis;
               if constexpr (FEAT) { Sf.x += fx * vis; Sf.y += fy * vis; Sf.z += fz * vis; }
               T = T_before;
+              auto h = [](float x) { x = isfinite(x) ? fminf(fmaxf(x, -60000.f), 60000.f) : 0.f; return __float2half(x); };
+              __half* row = A + (size_t)j * RT_PX + threadIdx.x;
+              row[0] = h(vis);
+              row[(size_t)1 * GROUP * RT_PX] = h(s_va);
+              row[(size_t)2 * GROUP * RT_PX] = h(s_vs);
+              row[(size_t)3 * GROUP * RT_PX] = h(s_r);
             }
           }
         }
-        auto h = [](float x) { x = isfinite(x) ? fminf(fmaxf(x, -60000.f), 60000.f) : 0.f; return __float2half(x); };
-        __half* row = A + (size_t)j * TILE_PX + threadIdx.x;
-        row[0] = h(s_vis);
-        row[(size_t)1 * GROUP * TILE_PX] = h(s_va);
-        row[(size_t)2 * GROUP * TILE_PX] = h(s_vs);
-        row[(size_t)3 * GROUP * TILE_PX] = h(s_r);
       }
       __syncthreads();
-      // MMA: warp w -> type (w & 3), k-half (w >> 2).
+      // MMA: each warp reduces NTYPES / NWARPS scalar types over the full K = RT_PX.
       {
-        int type = warp & 3, khalf = warp >> 2;
-        wmma::fragment<wmma::accumulator, 16, 16, 16, float> acc;
-        wmma::fill_fragment(acc, 0.f);
-        const __half* Ab = A + (size_t)type * GROUP * TILE_PX;
+        constexpr int NWARPS = RT_PX / 32;
+        constexpr int TYPES_PER_WARP = NTYPES / NWARPS;
+        for (int tt = 0; tt < TYPES_PER_WARP; tt++) {
+          int type = warp * TYPES_PER_WARP + tt;
+          wmma::fragment<wmma::accumulator, 16, 16, 16, float> acc;
+          wmma::fill_fragment(acc, 0.f);
+          const __half* Ab = A + (size_t)type * GROUP * RT_PX;
 #pragma unroll
-        for (int ks = 0; ks < 8; ks++) {
-          int k0 = khalf * 128 + ks * 16;
-          wmma::fragment<wmma::matrix_a, 16, 16, 16, __half, wmma::row_major> fa;
-          wmma::fragment<wmma::matrix_b, 16, 16, 16, __half, wmma::row_major> fb;
-          wmma::load_matrix_sync(fa, Ab + k0, TILE_PX);
-          wmma::load_matrix_sync(fb, Bm + (size_t)k0 * NB, NB);
-          wmma::mma_sync(acc, fa, fb, acc);
+          for (int ks = 0; ks < RT_PX / 16; ks++) {
+            int k0 = ks * 16;
+            wmma::fragment<wmma::matrix_a, 16, 16, 16, __half, wmma::row_major> fa;
+            wmma::fragment<wmma::matrix_b, 16, 16, 16, __half, wmma::row_major> fb;
+            wmma::load_matrix_sync(fa, Ab + k0, RT_PX);
+            wmma::load_matrix_sync(fb, Bm + (size_t)k0 * NB, NB);
+            wmma::mma_sync(acc, fa, fb, acc);
+          }
+          wmma::store_matrix_sync(Cp + (size_t)type * GROUP * NB, acc, NB, wmma::mem_row_major);
         }
-        wmma::store_matrix_sync(Cp + (size_t)warp * GROUP * NB, acc, NB, wmma::mem_row_major);
       }
       __syncthreads();
       if (threadIdx.x < (unsigned)gcount) {
         int j = threadIdx.x, sj = gbase + j;
-        auto Cv = [&](int type, int col) { return Cp[(size_t)(type) * GROUP * NB + j * NB + col] + Cp[(size_t)(type + 4) * GROUP * NB + j * NB + col]; };
+        auto Cv = [&](int type, int col) { return Cp[(size_t)(type) * GROUP * NB + j * NB + col]; };
         float sum_vis = Cv(0, 12);
         if (sum_vis > 0.f) {
           float4 a = s0[sj]; float4 c = s1[sj]; float4 col = s2[sj];
@@ -191,7 +202,7 @@ bool g_attr_set[2] = {false, false};
 
 void rasterize_backward_tc(RenderCtx& ctx, const Model& m, const RenderParams& p, float grad_scale, cudaStream_t stream) {
   float3 bg = make_float3(p.bg[0], p.bg[1], p.bg[2]);
-  dim3 grid(ctx.n_tiles), block(TILE_PX);
+  dim3 grid(ctx.n_tiles), block(RT_PX);
   size_t smem = SmemLayout::total;
   float inv = 1.f / grad_scale;
   if (p.feat != FeatureMode::None) {

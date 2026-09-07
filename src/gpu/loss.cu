@@ -267,10 +267,13 @@ void ensure_gauss() {
 
 }  // namespace
 
+static int loss_tiles_x(const RenderCtx& ctx) { return (ctx.W + TILE_W - 1) / TILE_W; }
+static int loss_tiles(const RenderCtx& ctx) { return loss_tiles_x(ctx) * ((ctx.H + TILE_W - 1) / TILE_W); }
+
 void photometric_loss(RenderCtx& ctx, const ViewGPU& view, const LossParams& lp, cudaStream_t stream) {
   ensure_gauss();
-  dim3 grid(ctx.n_tiles, 3), block(TILE_PX);
-  photometric_kernel<<<grid, block, 0, stream>>>(ctx.out_rgba, view.rgba, view.weights, ctx.W, ctx.H, ctx.tiles_x, lp, (float*)ctx.v_out.ptr, ctx.loss_accum.ptr);
+  dim3 grid(loss_tiles(ctx), 3), block(TILE_PX);
+  photometric_kernel<<<grid, block, 0, stream>>>(ctx.out_rgba, view.rgba, view.weights, ctx.W, ctx.H, loss_tiles_x(ctx), lp, (float*)ctx.v_out.ptr, ctx.loss_accum.ptr);
   CUDA_KERNEL_CHECK();
 }
 
@@ -285,8 +288,8 @@ void normal_loss(RenderCtx& ctx, const ViewGPU& view, const LossParams& lp, cuda
 
 void eval_metrics(RenderCtx& ctx, const ViewGPU& view, bool mask_weighted, cudaStream_t stream) {
   ensure_gauss();
-  dim3 grid(ctx.n_tiles, 3), block(TILE_PX);
-  eval_kernel<<<grid, block, 0, stream>>>(ctx.out_rgba, view.rgba, ctx.W, ctx.H, ctx.tiles_x, mask_weighted, ctx.loss_accum.ptr);
+  dim3 grid(loss_tiles(ctx), 3), block(TILE_PX);
+  eval_kernel<<<grid, block, 0, stream>>>(ctx.out_rgba, view.rgba, ctx.W, ctx.H, loss_tiles_x(ctx), mask_weighted, ctx.loss_accum.ptr);
   CUDA_KERNEL_CHECK();
 }
 
