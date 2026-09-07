@@ -1,0 +1,230 @@
+#pragma once
+#include "gpu/util.cuh"
+
+namespace b2c {
+
+constexpr float SH_C0_DEV = 0.28209479177387814f;
+constexpr float ALPHA_CUTOFF = 1.0f / 255.0f;
+constexpr float T_CUTOFF = 1e-4f;
+constexpr float ALPHA_MAX = 0.999f;
+constexpr uint32_t GRAD_LANES = 13;  // xy(2) conic(3) rgb(3) opac(1) refine(1) feat(3)
+
+struct Sym2 { float c00, c01, c11; };
+
+__device__ __forceinline__ float calc_sigma(float px, float py, Sym2 conic, float mx, float my) {
+  float dx = px - mx, dy = py - my;
+  return 0.5f * (conic.c00 * dx * dx + conic.c11 * dy * dy) + conic.c01 * dx * dy;
+}
+
+// Conservative ellipse-vs-tile test (StopThePop), identical to brush's `will_primitive_contribute`.
+__device__ __forceinline__ bool tile_hit(float rmin_x, float rmin_y, float rmax_x, float rmax_y, float mx, float my, Sym2 conic, float power) {
+  bool x_left = mx < rmin_x, x_right = mx > rmax_x, in_x = !(x_left || x_right);
+  bool y_above = my < rmin_y, y_below = my > rmax_y, in_y = !(y_above || y_below);
+  if (in_x && in_y) return true;
+  float corner_x = x_left ? rmin_x : rmax_x, corner_y = y_above ? rmin_y : rmax_y;
+  float width = rmax_x - rmin_x, height = rmax_y - rmin_y;
+  float dxf = x_left ? width : -width, dyf = y_above ? height : -height;
+  float diff_x = mx - corner_x, diff_y = my - corner_y;
+  float tx_raw = (dxf * conic.c00 * diff_x + dxf * conic.c01 * diff_y) / (dxf * conic.c00 * dxf);
+  float ty_raw = (dyf * conic.c01 * diff_x + dyf * conic.c11 * diff_y) / (dyf * conic.c11 * dyf);
+  float tx = in_y ? 0.f : fminf(fmaxf(tx_raw, 0.f), 1.f);
+  float ty = in_x ? 0.f : fminf(fmaxf(ty_raw, 0.f), 1.f);
+  float px = corner_x + tx * dxf, py = corner_y + ty * dyf;
+  return calc_sigma(px, py, conic, mx, my) <= power;
+}
+
+struct TileBox { int min_x, min_y, max_x, max_y; };
+__device__ __forceinline__ TileBox tile_bbox(float mx, float my, float ex, float ey, int tiles_x, int tiles_y) {
+  float tw = (float)TILE_W;
+  float cx = mx / tw, cy = my / tw, dx = ex / tw, dy = ey / tw;
+  TileBox b;
+  b.min_x = (int)fminf(fmaxf(cx - dx, 0.f), (float)tiles_x);
+  b.min_y = (int)fminf(fmaxf(cy - dy, 0.f), (float)tiles_y);
+  b.max_x = (int)fminf(fmaxf(cx + dx + 1.f, 0.f), (float)tiles_x);
+  b.max_y = (int)fminf(fmaxf(cy + dy + 1.f, 0.f), (float)tiles_y);
+  return b;
+}
+
+// Spherical harmonics (Sloan basis), coefficient-major [K][3]. Returns colour without the +0.5 offset.
+template <int DEG>
+__device__ __forceinline__ float3 sh_eval(const float* c, float3 v) {
+  float3 col = make_float3(c[0], c[1], c[2]) * SH_C0_DEV;
+  if constexpr (DEG >= 1) {
+    const float f0a = 0.4886025f;
+    col = col + make_float3(c[3], c[4], c[5]) * (-f0a * v.y);
+    col = col + make_float3(c[6], c[7], c[8]) * (f0a * v.z);
+    col = col + make_float3(c[9], c[10], c[11]) * (-f0a * v.x);
+    if constexpr (DEG >= 2) {
+      float z2 = v.z * v.z;
+      float f0b = -1.0925485f * v.z, f1a = 0.54627424f;
+      float fc1 = v.x * v.x - v.y * v.y, fs1 = 2.f * v.x * v.y;
+      float p4 = f1a * fs1, p5 = f0b * v.y, p6 = 0.9461747f * z2 - 0.31539157f, p7 = f0b * v.x, p8 = f1a * fc1;
+      col = col + make_float3(c[12], c[13], c[14]) * p4;
+      col = col + make_float3(c[15], c[16], c[17]) * p5;
+      col = col + make_float3(c[18], c[19], c[20]) * p6;
+      col = col + make_float3(c[21], c[22], c[23]) * p7;
+      col = col + make_float3(c[24], c[25], c[26]) * p8;
+      if constexpr (DEG >= 3) {
+        float f0c = -2.285229f * z2 + 0.4570458f, f1b = 1.4453057f * v.z, f2a = -0.5900436f;
+        float fc2 = v.x * fc1 - v.y * fs1, fs2 = v.x * fs1 + v.y * fc1;
+        float p12 = v.z * (1.8658817f * z2 - 1.119529f);
+        float p9 = f2a * fs2, p10 = f1b * fs1, p11 = f0c * v.y, p13 = f0c * v.x, p14 = f1b * fc1, p15 = f2a * fc2;
+        col = col + make_float3(c[27], c[28], c[29]) * p9;
+        col = col + make_float3(c[30], c[31], c[32]) * p10;
+        col = col + make_float3(c[33], c[34], c[35]) * p11;
+        col = col + make_float3(c[36], c[37], c[38]) * p12;
+        col = col + make_float3(c[39], c[40], c[41]) * p13;
+        col = col + make_float3(c[42], c[43], c[44]) * p14;
+        col = col + make_float3(c[45], c[46], c[47]) * p15;
+        if constexpr (DEG >= 4) {
+          float f0d = v.z * (-4.683326f * z2 + 2.0071396f), f1c = 3.3116114f * z2 - 0.47308735f, f2b = -1.7701308f * v.z, f3a = 0.62583575f;
+          float fc3 = v.x * fc2 - v.y * fs2, fs3 = v.x * fs2 + v.y * fc2;
+          float p20 = 1.9843135f * v.z * p12 - 1.0062306f * p6;
+          float p16 = f3a * fs3, p17 = f2b * fs2, p18 = f1c * fs1, p19 = f0d * v.y, p21 = f0d * v.x, p22 = f1c * fc1, p23 = f2b * fc2, p24 = f3a * fc3;
+          col = col + make_float3(c[48], c[49], c[50]) * p16;
+          col = col + make_float3(c[51], c[52], c[53]) * p17;
+          col = col + make_float3(c[54], c[55], c[56]) * p18;
+          col = col + make_float3(c[57], c[58], c[59]) * p19;
+          col = col + make_float3(c[60], c[61], c[62]) * p20;
+          col = col + make_float3(c[63], c[64], c[65]) * p21;
+          col = col + make_float3(c[66], c[67], c[68]) * p22;
+          col = col + make_float3(c[69], c[70], c[71]) * p23;
+          col = col + make_float3(c[72], c[73], c[74]) * p24;
+        }
+      }
+    }
+  }
+  return col;
+}
+
+// Evaluate the SH basis values b[k] for direction v (so colour = sum_k b[k] * c[k]). Used by the backward.
+template <int DEG>
+__device__ __forceinline__ void sh_basis(float3 v, float* b) {
+  b[0] = SH_C0_DEV;
+  if constexpr (DEG >= 1) {
+    const float f0a = 0.4886025f;
+    b[1] = -f0a * v.y; b[2] = f0a * v.z; b[3] = -f0a * v.x;
+    if constexpr (DEG >= 2) {
+      float z2 = v.z * v.z, f0b = -1.0925485f * v.z, f1a = 0.54627424f;
+      float fc1 = v.x * v.x - v.y * v.y, fs1 = 2.f * v.x * v.y;
+      b[4] = f1a * fs1; b[5] = f0b * v.y; b[6] = 0.9461747f * z2 - 0.31539157f; b[7] = f0b * v.x; b[8] = f1a * fc1;
+      if constexpr (DEG >= 3) {
+        float f0c = -2.285229f * z2 + 0.4570458f, f1b = 1.4453057f * v.z, f2a = -0.5900436f;
+        float fc2 = v.x * fc1 - v.y * fs1, fs2 = v.x * fs1 + v.y * fc1;
+        b[9] = f2a * fs2; b[10] = f1b * fs1; b[11] = f0c * v.y; b[12] = v.z * (1.8658817f * z2 - 1.119529f); b[13] = f0c * v.x; b[14] = f1b * fc1; b[15] = f2a * fc2;
+        if constexpr (DEG >= 4) {
+          float f0d = v.z * (-4.683326f * z2 + 2.0071396f), f1c = 3.3116114f * z2 - 0.47308735f, f2b = -1.7701308f * v.z, f3a = 0.62583575f;
+          float fc3 = v.x * fc2 - v.y * fs2, fs3 = v.x * fs2 + v.y * fc2;
+          b[16] = f3a * fs3; b[17] = f2b * fs2; b[18] = f1c * fs1; b[19] = f0d * v.y; b[20] = 1.9843135f * v.z * b[12] - 1.0062306f * b[6];
+          b[21] = f0d * v.x; b[22] = f1c * fc1; b[23] = f2b * fc2; b[24] = f3a * fc3;
+        }
+      }
+    }
+  }
+}
+
+// Depth -> sort key bits: map z in [0, inf) to (2z+1)/(z+1) in [1,2) and keep the top mantissa bits.
+__device__ __forceinline__ uint32_t depth_code(float z, int depth_bits) {
+  float d = (2.f * z + 1.f) / (z + 1.f);
+  uint32_t m = __float_as_uint(d) & 0x7FFFFFu;
+  return m >> (23 - depth_bits);
+}
+
+// Everything the projection produces that the backward needs to re-derive gradients.
+struct ProjIntermediates {
+  float3 mean_c;      // view-space mean
+  float3 s;           // effective world scales (with floor)
+  float3 s2_raw;      // exp(2 log s)
+  float comp_floor;   // min-scale opacity compensation
+  Mat3 Rq;            // rotation from normalised quat
+  Mat3 Mtot;          // R_view * Rq * diag(s)
+  float J[6];         // 2x3 projection Jacobian, row-major
+  bool clamp_x, clamp_y;
+  Sym2 cov_raw;       // before blur
+  Sym2 cov;           // blurred
+  Sym2 conic;
+  float opac;         // effective opacity
+  float sig;          // sigmoid(raw)
+  float filter_comp;  // mip compensation
+  float2 mean2d;
+  float ex, ey;
+  bool ok;
+};
+
+struct CamDev {
+  float R[9]; float t[3]; float pos[3]; float fx, fy, cx, cy; int W, H; float lim_pos_x, lim_pos_y, lim_neg_x, lim_neg_y;
+};
+
+// Shared projection math (forward). Returns ok=false when the splat is culled.
+__device__ __forceinline__ ProjIntermediates project_one(float4 po, float4 q, float4 ls, const CamDev& cam, bool mip) {
+  ProjIntermediates r; r.ok = false;
+  float3 mean = make_float3(po.x, po.y, po.z);
+  Mat3 Rv; for (int i = 0; i < 9; i++) Rv.m[i] = cam.R[i];
+  float3 mc = mat3_mul(Rv, mean) + make_float3(cam.t[0], cam.t[1], cam.t[2]);
+  r.mean_c = mc;
+  if (!(finite3(mc) && mc.z <= 1e10f)) return r;
+  if (!(mc.z >= 0.01f)) return r;
+  float3 s2 = make_float3(__expf(2.f * ls.x), __expf(2.f * ls.y), __expf(2.f * ls.z));
+  r.s2_raw = s2;
+  float f2 = ls.w * ls.w;
+  float3 s2f = make_float3(s2.x + f2, s2.y + f2, s2.z + f2);
+  r.s = make_float3(sqrtf(s2f.x), sqrtf(s2f.y), sqrtf(s2f.z));
+  r.comp_floor = ls.w > 0.f ? sqrtf((s2.x * s2.y * s2.z) / (s2f.x * s2f.y * s2f.z)) : 1.f;
+  if (!finite3(r.s)) return r;
+  float qn2 = q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w;
+  if (!(qn2 >= 1e-6f && isfinite(qn2))) return r;
+  if (!isfinite(po.w)) return r;
+  float inv_qn = rsqrtf(qn2);
+  float4 qn = make_float4(q.x * inv_qn, q.y * inv_qn, q.z * inv_qn, q.w * inv_qn);
+  r.Rq = quat_to_mat(qn);
+  Mat3 M = mat3_mul(Rv, r.Rq);
+  // scale columns
+  for (int i = 0; i < 3; i++) { M.m[i * 3] *= r.s.x; M.m[i * 3 + 1] *= r.s.y; M.m[i * 3 + 2] *= r.s.z; }
+  r.Mtot = M;
+  float inv_z = 1.f / mc.z;
+  float rx = mc.x * inv_z, ry = mc.y * inv_z;
+  float cxr = fminf(fmaxf(rx, cam.lim_neg_x), cam.lim_pos_x), cyr = fminf(fmaxf(ry, cam.lim_neg_y), cam.lim_pos_y);
+  r.clamp_x = !(rx <= cam.lim_pos_x && rx >= cam.lim_neg_x);
+  r.clamp_y = !(ry <= cam.lim_pos_y && ry >= cam.lim_neg_y);
+  float dx = cam.fx * inv_z, dy = cam.fy * inv_z;
+  r.J[0] = dx; r.J[1] = 0.f; r.J[2] = -dx * cxr;
+  r.J[3] = 0.f; r.J[4] = dy; r.J[5] = -dy * cyr;
+  // V = J * M (2x3)
+  float V[6];
+  for (int i = 0; i < 2; i++) for (int j = 0; j < 3; j++) V[i * 3 + j] = r.J[i * 3] * M.m[j] + r.J[i * 3 + 1] * M.m[3 + j] + r.J[i * 3 + 2] * M.m[6 + j];
+  Sym2 raw; raw.c00 = V[0] * V[0] + V[1] * V[1] + V[2] * V[2]; raw.c01 = V[0] * V[3] + V[1] * V[4] + V[2] * V[5]; raw.c11 = V[3] * V[3] + V[4] * V[4] + V[5] * V[5];
+  float max_abs = fmaxf(fabsf(raw.c00), fmaxf(fabsf(raw.c01), fabsf(raw.c11)));
+  if (max_abs > 1e18f) { float k = 1e18f / max_abs; raw.c00 *= k; raw.c01 *= k; raw.c11 *= k; }
+  r.cov_raw = raw;
+  float blur = mip ? 0.1f : 0.3f;
+  Sym2 cov = raw; cov.c00 += blur; cov.c11 += blur;
+  r.cov = cov;
+  r.filter_comp = 1.f;
+  if (mip) {
+    float det_raw = fmaxf(raw.c00 * raw.c11 - raw.c01 * raw.c01, 0.f);
+    float det_bl = cov.c00 * cov.c11 - cov.c01 * cov.c01;
+    r.filter_comp = sqrtf(det_raw / det_bl);
+  }
+  r.sig = sigmoidf_(po.w);
+  r.opac = r.sig * r.filter_comp * r.comp_floor;
+  if (!(isfinite(cov.c00) && isfinite(cov.c01) && isfinite(cov.c11))) return r;
+  float det = cov.c00 * cov.c11 - cov.c01 * cov.c01;
+  if (!(det > 0.f)) return r;
+  float inv_det = 1.f / det;
+  r.conic.c00 = cov.c11 * inv_det; r.conic.c01 = -cov.c01 * inv_det; r.conic.c11 = cov.c00 * inv_det;
+  r.mean2d = make_float2(cam.fx * rx + cam.cx, cam.fy * ry + cam.cy);
+  if (!(r.opac >= ALPHA_CUTOFF)) return r;
+  float power = __logf(r.opac * 255.f);
+  float detc = r.conic.c00 * r.conic.c11 - r.conic.c01 * r.conic.c01;
+  if (!(detc > 0.f)) return r;
+  float inv_detc = 1.f / detc;
+  r.ex = sqrtf(2.f * power * r.conic.c11 * inv_detc);
+  r.ey = sqrtf(2.f * power * r.conic.c00 * inv_detc);
+  if (!(r.ex >= 0.f && r.ey >= 0.f)) return r;
+  bool on_screen = r.mean2d.x + r.ex > 0.f && r.mean2d.x - r.ex < (float)cam.W && r.mean2d.y + r.ey > 0.f && r.mean2d.y - r.ey < (float)cam.H;
+  if (!on_screen) return r;
+  r.ok = true;
+  return r;
+}
+
+}  // namespace b2c

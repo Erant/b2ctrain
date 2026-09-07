@@ -1,0 +1,8 @@
+/splat/
+/build/
+/build-*/
+*.ply
+!tests/data/*.ply
+/out/
+/.cache/
+compile_commands.json
