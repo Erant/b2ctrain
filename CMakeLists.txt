@@ -39,6 +39,7 @@ add_library(b2c_core STATIC
   src/train/init.cpp
   src/train/evidence.cu
   src/render/renderer.cpp
+  src/render/confidence.cu
 )
 target_include_directories(b2c_core PUBLIC src third_party)
 target_link_libraries(b2c_core PUBLIC Threads::Threads)
