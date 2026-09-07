@@ -34,8 +34,9 @@ cmake --build build
 
 `--recipe brush` reproduces the brush fork's training dynamics (dense Adam, full resolution from step one, the floor
 baked into the scales at every refine). `--recipe fast` (default) adds sparse Adam, a progressive resolution schedule
-(1/4 -> 1/2 -> 1x over the first 40% of iterations), fp16 storage for the SH bands above DC (`--sh-fp32` to keep
-them in fp32) and a non-accumulating floor. Both produce the same splat counts.
+(1/4 -> 1/2 -> 1x over the first 40% of iterations) and a non-accumulating floor. Both produce the same splat counts.
+`--sh-fp16` stores the SH bands above DC as fp16 for ~8% more speed on large models, but its stochastic rounding
+leaves view-dependent colour speckle on specular surfaces at novel views, so it is off by default.
 
 ## Alignment loop
 

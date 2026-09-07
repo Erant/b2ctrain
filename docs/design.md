@@ -5,12 +5,14 @@
   `[K*3][cap]` so the projection and optimizer kernels read coefficients coalesced across threads. `lscale.w` holds the
   Mip-Splatting 3D-filter floor `f` (a frozen constant; `--recipe brush` bakes it into the scales at every refine, as the
   fork does; `--recipe fast` applies it on the fly and bakes only at export).
-- SH bands >= 1 (45 of the 48 lanes at degree 3) and their first moments are stored as fp16 in the fast recipe
-  (`ShBuf` in `util.cuh`, `--sh-fp32` keeps them in fp32; the brush recipe, the render subcommand and the tests stay
-  fp32). Parameter updates are stochastically rounded: at the 2e-4 learning rate a plain round-to-nearest store would
-  drop most updates to coefficients above ~0.25 (half an fp16 ulp there is 1.2e-4) and freeze them. Moments round to
-  nearest. This halves the largest per-splat buffer pair: optimizer 2.28 -> 1.93 ms/step, projection-side forward
-  2.28 -> 2.14 on the warm 866k model.
+- SH bands >= 1 (45 of the 48 lanes at degree 3) and their first moments can be stored as fp16 (`--sh-fp16`, `ShBuf` in
+  `util.cuh`) with stochastically rounded parameter stores (at the 2e-4 learning rate a round-to-nearest store would drop
+  most updates to coefficients above ~0.25 and freeze them). It halves the largest per-splat buffer pair — optimizer
+  2.28 -> 1.93 ms/step, projection-side forward 2.28 -> 2.14 on the warm 866k model, stage 2 2m29s -> 2m18s at equal
+  training-view PSNR — but the rounding is a random walk of ~0.5 ulp per step on every high-band coefficient, and over
+  40k steps that is ~0.02-0.03 absolute on coefficients near 0.3: invisible at the training views, visible as
+  iridescent speckle on the metallic top at novel views (high-frequency chroma RMS 1.57 vs 1.36 on an elevated view,
+  fp16 vs fp32). Off by default for that reason; the storage path stays for a future error-compensated variant.
 - Adam moments mirror the parameter layout; the SH second moment is one scalar per splat (brush's Adam-mini style).
 - All training views are GPU resident as packed RGBA8 (premultiplied for transparent views), RGBA8 normals and u8 weights,
   plus 1/2 and 1/4 box-filtered levels when the resolution schedule is on.
@@ -52,7 +54,7 @@ A refit is what a fresh warm-started invocation was: optimizer state and Adam st
 warped frames, as the last pipeline invocation did. Cost per alignment pass at 81 views of 1080x1920: 0.7 s.
 
 ## Measured on the RTX 4070 Ti (2026-09-07, same argv as b2crunner's steps)
-| dataset | brush fork | b2ctrain `--recipe fast --sh-fp32` | b2ctrain `--recipe fast` (default, fp16 SH) |
+| dataset | brush fork | b2ctrain `--recipe fast` (default, fp32 SH) | b2ctrain `--recipe fast --sh-fp16` (not default: novel-view colour speckle) |
 |---|---|---|---|
 | stage 2 (135 views 720p, normals, mixed alpha, alpha weight 0.5) | 9m41s, 837k, 35.83 dB | 2m29s, 871k, 36.96 dB | 2m18s, 887k, 37.13 dB |
 | stage 5 (81 views 1080p, alpha weight 0.1, no normals) | 6m47s, 356k, 32.88 dB (older argv) | 1m40s, 364k, 34.23 dB | 1m39s, 389k, 34.47 dB |

@@ -5,8 +5,8 @@ Last updated: 2026-09-07 (second session). Written for whoever (human or Claude)
 ## One-line summary
 
 The trainer and the `render` subcommand work end to end, are validated against the brush fork (`~/Projects/brush`) on
-both example datasets, run at **4.2x brush's wall time** at equal or better quality on an RTX 4070 Ti, and now also
-carry b2crunner's stage-5 alignment loop in-process. b2crunner is wired to it in the working tree (Dockerfile stage,
+both example datasets, run at **~3.9x brush's wall time** at equal or better quality on an RTX 4070 Ti, and now also
+carry b2crunner's stage-5 alignment loop in-process (which takes the stage-5 step from 5m30s to ~2m50s). b2crunner is wired to it in the working tree (Dockerfile stage,
 workflow params, doctor, step backend) but those changes are **not committed there** — see "What's left".
 
 ## Plan and contract
@@ -26,18 +26,20 @@ live in `docs/design.md`; this file tracks status, not design. Source of truth o
 | 3 | Backward + loss + optimizer | Done — validated by `tests/b2c_tests` against a double-precision CPU reference, 0/1156 mismatches |
 | 4 | Refinement + schedules, full 30k runs | Done — see measured results below |
 | 5 | Evidence + integration | Done. Evidence export matches brush column-by-column; `b2ctrain render --confidence` matches `brush-splat-render` to 1/255. **Both b2crunner training steps ran end to end through b2crunner's real `brush` step class** (`bench/b2crunner_step.py`) with b2ctrain as trainer and the shim as rasteriser: stage 2 cold + 9000-step polish (3m44s), stage 5 cold + 4-iteration alignment loop (5m30s through the pipeline loop, 2m38s with the loop in the trainer). `pipeline.cli doctor` passes |
-| 6 | Performance | ~4.2x brush at the default recipe (target was 5x). Kernel-level work is in single digits now; see "Performance journey" |
+| 6 | Performance | ~3.9x brush at the default recipe (target was 5x). Kernel-level work is in single digits now; see "Performance journey" |
 | 7 | Docker / b2crunner | Written in b2crunner's working tree, uncommitted: `b2ctrain-builder` stage + runtime copies in `docker/Dockerfile`, `brush_path: b2ctrain` on both trainings, doctor check, `align_backend` on the step. Not yet built as an image or run on a pod |
 
 ## Measured results (RTX 4070 Ti, argv as b2crunner's steps pass it)
 
-| dataset | brush fork | b2ctrain `--sh-fp32` | b2ctrain default (fp16 SH) |
+| dataset | brush fork | b2ctrain default (fp32 SH) | b2ctrain `--sh-fp16` (not default, see below) |
 |---|---|---|---|
-| stage 2 (135 views, 720p, normals, support views, alpha weight 0.5) | 9m41s / 837k / 35.83 dB | 2m29s / 871k / 36.96 dB | **2m18s / 887k / 37.13 dB** |
-| stage 5 (81 views, 1080p, alpha weight 0.1, no normals) | 6m47s / 356k / 32.88 dB (older argv) | 1m40s / 364k / 34.23 dB | **1m39s / 389k / 34.47 dB** |
+| stage 2 (135 views, 720p, normals, support views, alpha weight 0.5) | 9m41s / 837k / 35.83 dB | **2m29s / 871k / 36.96 dB** | 2m18s / 887k / 37.13 dB |
+| stage 5 (81 views, 1080p, alpha weight 0.1, no normals) | 6m47s / 356k / 32.88 dB (older argv) | **1m40s / 364k / 34.23 dB** | 1m39s / 389k / 34.47 dB |
 
 PSNR/SSIM are mask-weighted against the training frames (`bench/eval_ply.py`). The stage-5 brush row was measured
 with a different argv on 2026-09-06 and is only indicative; the two b2ctrain columns are a clean A/B from today.
+Training-view PSNR does not see everything: the fp16 column is higher there and yet its splats carry iridescent
+colour speckle on the metallic top at novel views (below).
 
 Full b2crunner step shapes (through `bench/b2crunner_step.py`, `brush_path` = b2ctrain):
 
@@ -45,11 +47,11 @@ Full b2crunner step shapes (through `bench/b2crunner_step.py`, `brush_path` = b2
 |---|---|---|
 | `train_splat` (stage 2) | cold 30k + polish 9k from `init.ply` (growth off, refine never, full res) | 3m44s |
 | `train_final_splat` (stage 5), pipeline loop | cold 30k + 4 x (render process, Python DIS flow + warp, re-invoke 3k) | 5m30s |
-| `train_final_splat` (stage 5), in-trainer loop (`--align-iters 4`) | cold 30k + 4 x (GPU render + flow + warp 0.7 s, refit 3k 14 s) | **2m38s** |
+| `train_final_splat` (stage 5), in-trainer loop (`--align-iters 4`) | cold 30k + 4 x (GPU render + flow + warp 0.7 s, refit 3k 14 s) | **2m38s** (fp16 SH run; ~2m50s with the fp32 default) |
 
 Alignment trajectories (mean measured disagreement, px): pipeline loop through b2ctrain 1.06 → 1.26 → 1.42 → 1.52;
-in-trainer loop 1.43 → 1.62 → 1.74 → 1.83 (both rising and decelerating like the reference 1.02 → 1.31); PSNR of
-the final splat against the pristine frames 32.24 vs 32.39 dB. On the same model and renders the in-trainer flow's
+in-trainer loop 1.47 → 1.64 → 1.75 → 1.83 (both rising and decelerating like the reference 1.02 → 1.31); PSNR of
+the final splat against the pristine frames 32.24 vs 32.29 dB (fp32 default). On the same model and renders the in-trainer flow's
 batch mean equals DIS's (1.48 vs 1.47 px) and its p90 is 11% higher (per-view correlation ~0.6: the two algorithms
 disagree per view, agree in aggregate).
 
@@ -68,10 +70,17 @@ backward 1.70, forward raster 0.78, projection 0.56, radix sorts 0.38, photometr
 7. Optimizer skips gradient-buffer traffic entirely for invisible splats.
 8. Compact per-splat hit info (bitmask + packed bbox) for the emit pass.
 9. Warp-cooperative coalesced intersection emit.
-10. **fp16 storage for SH bands >= 1 and their first moments** (`ShBuf`, stochastically rounded parameter stores):
-    optimizer 2.28 → 1.93 ms/step, projection-side forward 2.28 → 2.14; stage 2 2m29s → 2m18s at equal quality.
+10. fp16 storage for SH bands >= 1 and their first moments (`ShBuf`, stochastically rounded parameter stores):
+    optimizer 2.28 → 1.93 ms/step, projection-side forward 2.28 → 2.14; stage 2 2m29s → 2m18s at equal
+    training-view PSNR. **Kept behind `--sh-fp16`, off by default** — see the next section.
 
 ### Tried and reverted (recorded so they aren't retried)
+- **fp16 SH as the default**: the stochastic rounding is a ~0.5 ulp random walk per step on every high-band
+  coefficient; over 40k steps that is 0.02-0.03 absolute near 0.3, invisible at the training views and visible as
+  iridescent speckle on the metallic top at novel views (the user spotted it in a render; confirmed on an elevated
+  synthetic view: high-frequency chroma RMS 1.57-1.62 for both fp16 splats vs 1.32-1.42 for fp32 ones, and a direct
+  fp16/fp32 pair of the in-trainer alignment run). Performance must not cost visible quality, so fp32 is the default;
+  the storage path stays for an error-compensated variant if one is ever worth it.
 - Merging the loss kernel's 3 colour-channel blocks into one: worse occupancy, net slower.
 - Splitting the SH Adam update into a lane-parallel kernel: extra global traffic outweighed the register relief.
 - Doubling the tensor-core backward's MMA group size (16→32): more shared memory, lower occupancy, 1.77 → 2.24 ms.
@@ -95,9 +104,11 @@ brush's 837k, and the sharpness metric b2crunner judges by was not measured. Lef
   `B2CTRAIN_REF` pin must point at the b2ctrain commit that is pushed.
 - **Build the image and run a pod.** The b2ctrain stage has not been built inside Docker yet (the binary needs CUDA 13
   at build time and driver >= 580 at run time), and no b2crunner pipeline has run end to end on a pod with the swap.
-- **Sharpness check of the in-trainer alignment.** PSNR and the trajectory shape match the pipeline loop; b2crunner's
-  band-limited face-sharpness metric (docs/final-splat-alignment-guide.md there) is what the loop was tuned on and has
-  not been run on the in-trainer result.
+- **Sharpness check of the in-trainer alignment.** PSNR, the trajectory shape and novel-view chroma noise (1.42 vs
+  1.32 on an elevated view, fp32 both) match the pipeline loop; b2crunner's band-limited face-sharpness metric
+  (docs/final-splat-alignment-guide.md there) is what the loop was tuned on and has not been run on the in-trainer result.
+- **fp16 SH without the noise**, if the 8% is ever wanted back: error-compensated rounding (carry the rounding residual)
+  rather than stochastic rounding, or fp16 moments only.
 - Everything the plan marked out of scope for milestone 1 is still out of scope: viewer/GUI, LOD baking, LPIPS,
   rerun logging, nerfstudio/RealityCapture loaders, non-pinhole cameras, `--render-mode mip`, random frustum init,
   multi-GPU.
@@ -105,10 +116,10 @@ brush's 837k, and the sharpness metric b2crunner judges by was not measured. Lef
 ## Repo map
 
 ```
-src/cli.*              brush-compatible argument parser (+ --sh-fp16/--sh-fp32, --res-*-until, --align-*)
+src/cli.*              brush-compatible argument parser (+ --sh-fp16 (opt-in), --res-*-until, --align-*)
 src/dataset/            COLMAP + sidecar loader (masks/normals/weights/init.ply)
 src/ply.*               PLY reader/writer (brush field order + ev_* evidence block)
-src/model.*             GPU splat parameter/moment buffers (SH bands >= 1 fp16 via ShBuf in gpu/util.cuh)
+src/model.*             GPU splat parameter/moment buffers (SH bands >= 1 optionally fp16 via ShBuf in gpu/util.cuh)
 src/gpu/                CUDA kernels: project, binning, raster fwd/bwd (+ tensor-core variant), loss, optim
                         (fused projection-backward + Adam + noise), refine, images (resolution pyramid),
                         align (LK flow, Gaussian blur, Lanczos warp for the alignment loop)
@@ -139,6 +150,8 @@ python3 bench/eval_ply.py out/export.ply splat/colmap_intermediate --every 9
 ./build/b2ctrain splat/colmap --total-train-iters 30000 --sh-degree 3 --export-path out5 --export-name scene.ply \
   --export-every 30000 --max-resolution 1920 --max-splats 10000000 --refine-every 200 --match-alpha-weight 0.1 \
   --export-evidence --align-iters 4 --align-steps 3000 --align-debug-dir out5/alignment
+
+# splats from these runs (not in git): out/2026-09-07/*.ply, with the alignment debug files beside them
 
 # the same two through b2crunner's own step class (needs b2crunner's venv):
 ~/Projects/b2crunner/.venv/bin/python bench/b2crunner_step.py splat/colmap_intermediate out2 --polish-steps 9000 --align-iters 0 --match-alpha-weight 0.5

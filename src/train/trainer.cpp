@@ -88,7 +88,7 @@ int train_main(const Config& cfg) {
   if ((cfg.res_schedule || cfg.recipe == Recipe::Fast) && warm_start) log_info("Warm start from init.ply: resolution schedule off, training at full resolution");
   if (res_schedule) gv.build_pyramid(3, stream);
   GpuViews gv_eval; if (!ds.eval.empty()) gv_eval.upload(ds.eval);
-  Model model; model.sh_fp16 = cfg.sh_fp16 || (cfg.recipe == Recipe::Fast && !cfg.sh_fp32); model.upload(init, stream);
+  Model model; model.sh_fp16 = cfg.sh_fp16 && !cfg.sh_fp32; model.upload(init, stream);
   RenderCtx ctx; ctx.setup(std::max(gv.max_w, gv_eval.max_w), std::max(gv.max_h, gv_eval.max_h), model.cap, stream);
   log_info("Loaded %zu initial splats, %zu views on GPU in %.1fs", init.n, ds.train.size(), now_seconds() - t_load);
 

@@ -54,7 +54,7 @@ struct Config {
   // b2ctrain additions
   Recipe recipe = Recipe::Fast;
   bool sparse_adam = false;
-  bool sh_fp16 = false, sh_fp32 = false;  // storage of SH bands >= 1; fast recipe defaults to fp16 unless --sh-fp32
+  bool sh_fp16 = false, sh_fp32 = false;  // storage of SH bands >= 1: fp32 unless --sh-fp16 (see cli.cpp for why)
   bool res_schedule = false;
   float res_quarter_until = 0.15f, res_half_until = 0.40f;  // progress fractions of the 1/4 and 1/2 resolution phases
   bool accumulate_min_scale = false;  // brush quirk: bake floor at every refine
