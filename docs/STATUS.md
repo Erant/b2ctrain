@@ -59,6 +59,31 @@ Per-step kernel breakdown at HEAD, warm 866k-splat stage-2 model (nsys, ms/step)
 backward 1.70, forward raster 0.78, projection 0.56, radix sorts 0.38, photometric loss 0.27, intersection emit 0.27;
 6.0 ms total against 6.07 ms wall (GPU idle ~1%).
 
+### Polish and alignment, measured with b2crunner's own sharpness tool (2026-09-07)
+
+`~/Downloads/refinesplat/tools/eval_splat.py`: band-limited face sharpness `s1` (Laplacian variance after a sigma-1
+blur of the Sapiens2 face crop) at the training views and at interpolated novel views. Stage 2 crops use a fresh
+Sapiens2 segmentation of its 81 frames.
+
+| splat | face s1 train / novel | hand6 / hand15 s1 | PSNR to originals |
+|---|---|---|---|
+| stage 5 cold (fp32) | 22.0 / 21.1 (guide's brush cold reference: 21.1 / 20.0) | 12.8 / 13.8 | 34.23 |
+| stage 5 + in-trainer alignment x4 | **23.8 / 23.0** (guide's brush reference after 4 iterations: 23.8) | 13.6 / 15.1 | 32.29 |
+| stage 5 + alignment + 9000-step polish | 23.6 / 22.8 | 13.4 / 14.7 | 34.90 |
+| stage 5 + alignment through the pipeline loop, pre-fix build | 21.3 / 20.7 | 12.2 / 13.9 | 32.24 |
+| stage 2 cold | 26.9 / 26.5 | 22.0 / 18.8 | 37.00 |
+| stage 2 + 3000-step polish | 26.8 / 26.5 | 22.3 / 18.9 | 36.85 |
+| stage 2 + 9000-step polish (the workflow's) | 27.2 / 26.8 | 22.6 / 19.4 | 37.23 |
+
+- The in-trainer alignment reproduces the guide's measured gain exactly (+1.8 face s1, the same at novel views).
+- A polish after the alignment adds nothing (within noise on every part); it only pulls fidelity back toward the
+  unwarped originals. Not worth adding to `train_final_splat`.
+- The stage-2 polish is worth +1% face s1, +3% hands, +0.2 dB for ~1 minute — a small, real, cheap gain; brush's
+  measured +12% raw face sharpness does not transfer because b2ctrain's cold run already lands above brush's polished
+  result (raw face Laplacian variance 162 cold vs brush's 161 polished). 3000 steps does nothing; 9000 is the minimum.
+- The pipeline-loop row is the splat trained before the warm-start fix: its refits ran through the 1/4 → 1/2
+  resolution schedule and lost sharpness below the cold start. Warm starts now train at full resolution.
+
 ## Performance journey (what worked, in order)
 
 1. 8x8 rasterizer tiles instead of 16x16 — cut backward fragment work ~3x for this scene's small splats.
