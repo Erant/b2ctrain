@@ -12,6 +12,7 @@ ap.add_argument("--renderer", default="b2ctrain", help="'b2ctrain' or path to br
 ap.add_argument("--b2ctrain", default=os.path.join(os.path.dirname(__file__), "..", "build", "b2ctrain"))
 ap.add_argument("--every", type=int, default=8)
 ap.add_argument("--keep", default="", help="directory to keep renders in")
+ap.add_argument("--verbose", action="store_true")
 a = ap.parse_args()
 
 def gauss_blur(x):
@@ -55,4 +56,5 @@ for c in cams:
     mse = (d * d).mean() / max(w.mean(), 0.01)
     s = np.mean([(ssim_map(pr[..., k], rgb[..., k]) * w[..., 0]).mean() for k in range(3)]) / max(w.mean(), 0.01)
     psnrs.append(10 * np.log10(1.0 / max(mse, 1e-12))); ssims.append(s)
+    if a.verbose: print(f"  {name}: PSNR {psnrs[-1]:.3f} SSIM {s:.4f}")
 print(f"{os.path.basename(a.ply)}: {len(psnrs)} views, PSNR {np.mean(psnrs):.3f} (min {np.min(psnrs):.2f}), SSIM {np.mean(ssims):.4f}")
