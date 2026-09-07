@@ -56,6 +56,7 @@ struct RenderCtx {
   DevBuf<uint32_t> last_idx;  // one past the last contributing intersection per pixel
   // backward
   DevBuf<float> v_splat;      // [n][13] per-splat 2D gradients: xy(2) conic(3) rgb(3) opac(1) refine(1) feat(3)
+  DevBuf<uint32_t> vis_flag;  // [n] set when a splat contributed to any pixel this step
   DevBuf<float4> v_out;       // dL/d(rgba) per pixel
   DevBuf<float4> v_feat;      // dL/d(feat) per pixel
   DevBuf<float> loss_accum;   // [8] scalar accumulators

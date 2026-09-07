@@ -47,14 +47,14 @@ __device__ __forceinline__ TileBox tile_bbox(float mx, float my, float ex, float
 
 // Spherical harmonics (Sloan basis), coefficient-major [K][3]. Returns colour without the +0.5 offset.
 template <int DEG>
-__device__ __forceinline__ float3 sh_eval(const float* c, float3 v) {
+__device__ __forceinline__ float3 sh_eval(const float* c, float3 v, int active) {
   float3 col = make_float3(c[0], c[1], c[2]) * SH_C0_DEV;
-  if constexpr (DEG >= 1) {
+  if constexpr (DEG >= 1) if (active >= 1) {
     const float f0a = 0.4886025f;
     col = col + make_float3(c[3], c[4], c[5]) * (-f0a * v.y);
     col = col + make_float3(c[6], c[7], c[8]) * (f0a * v.z);
     col = col + make_float3(c[9], c[10], c[11]) * (-f0a * v.x);
-    if constexpr (DEG >= 2) {
+    if constexpr (DEG >= 2) if (active >= 2) {
       float z2 = v.z * v.z;
       float f0b = -1.0925485f * v.z, f1a = 0.54627424f;
       float fc1 = v.x * v.x - v.y * v.y, fs1 = 2.f * v.x * v.y;
@@ -64,7 +64,7 @@ __device__ __forceinline__ float3 sh_eval(const float* c, float3 v) {
       col = col + make_float3(c[18], c[19], c[20]) * p6;
       col = col + make_float3(c[21], c[22], c[23]) * p7;
       col = col + make_float3(c[24], c[25], c[26]) * p8;
-      if constexpr (DEG >= 3) {
+      if constexpr (DEG >= 3) if (active >= 3) {
         float f0c = -2.285229f * z2 + 0.4570458f, f1b = 1.4453057f * v.z, f2a = -0.5900436f;
         float fc2 = v.x * fc1 - v.y * fs1, fs2 = v.x * fs1 + v.y * fc1;
         float p12 = v.z * (1.8658817f * z2 - 1.119529f);
@@ -76,7 +76,7 @@ __device__ __forceinline__ float3 sh_eval(const float* c, float3 v) {
         col = col + make_float3(c[39], c[40], c[41]) * p13;
         col = col + make_float3(c[42], c[43], c[44]) * p14;
         col = col + make_float3(c[45], c[46], c[47]) * p15;
-        if constexpr (DEG >= 4) {
+        if constexpr (DEG >= 4) if (active >= 4) {
           float f0d = v.z * (-4.683326f * z2 + 2.0071396f), f1c = 3.3116114f * z2 - 0.47308735f, f2b = -1.7701308f * v.z, f3a = 0.62583575f;
           float fc3 = v.x * fc2 - v.y * fs2, fs3 = v.x * fs2 + v.y * fc2;
           float p20 = 1.9843135f * v.z * p12 - 1.0062306f * p6;

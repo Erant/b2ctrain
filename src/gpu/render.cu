@@ -9,7 +9,8 @@ void RenderCtx::setup(int w, int h, int n, cudaStream_t stream) {
   size_t nn = (size_t)n;
   proj0.reserve(nn); proj1.reserve(nn); proj2.reserve(nn); proj3.reserve(nn);
   tile_count.reserve(nn); tile_off.reserve(nn);
-  v_splat.reserve(nn * 13);
+  if (v_splat.count < nn * 13) { v_splat.reserve(nn * 13); v_splat.zero(stream); }
+  if (vis_flag.count < nn) { vis_flag.reserve(nn); vis_flag.zero(stream); }
   tile_ranges.reserve(n_tiles);
   size_t npx = (size_t)W * H;
   out_rgba.reserve(npx); out_feat.reserve(npx); last_idx.reserve(npx); v_out.reserve(npx); v_feat.reserve(npx);

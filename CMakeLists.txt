@@ -35,6 +35,7 @@ add_library(b2c_core STATIC
   src/gpu/refine.cu
   src/gpu/images.cu
   src/train/trainer.cpp
+  src/train/init.cpp
   src/train/evidence.cu
   src/render/renderer.cpp
 )
@@ -50,6 +51,6 @@ add_executable(b2ctrain src/main.cpp)
 target_link_libraries(b2ctrain PRIVATE b2c_core)
 
 enable_testing()
-add_executable(b2c_tests tests/tests.cpp)
+add_executable(b2c_tests tests/tests.cpp tests/reference.cpp)
 target_link_libraries(b2c_tests PRIVATE b2c_core)
 add_test(NAME b2c_tests COMMAND b2c_tests)
