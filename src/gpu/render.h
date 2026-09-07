@@ -63,7 +63,6 @@ struct RenderCtx {
   DevBuf<float4> v_out;       // dL/d(rgba) per pixel
   DevBuf<float4> v_feat;      // dL/d(feat) per pixel
   DevBuf<float> loss_accum;   // [8] scalar accumulators
-  DevBuf<float4> sh_upd;      // [n] per-splat (dL/dcolour, adam denom) for the SH update kernel
 
   void setup(int W, int H, int n_splats, cudaStream_t stream);
 };

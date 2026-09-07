@@ -46,11 +46,10 @@ __device__ __forceinline__ TileBox tile_bbox(float mx, float my, float ex, float
 }
 
 // Spherical harmonics (Sloan basis), coefficient-major [K][3]. Returns colour without the +0.5 offset.
-// SH storage is planar: coefficient k, channel ch of splat i lives at sh[(k*3+ch)*stride + i]; `c` points at splat i's lane 0.
-#define SHC(k, ch) c[((k) * 3 + (ch)) * stride]
+#define SHC(k, ch) sb.get((k) * 3 + (ch), i)
 #define SH3(k) make_float3(SHC(k, 0), SHC(k, 1), SHC(k, 2))
 template <int DEG>
-__device__ __forceinline__ float3 sh_eval(const float* c, size_t stride, float3 v, int active) {
+__device__ __forceinline__ float3 sh_eval(const ShBuf& sb, int i, float3 v, int active) {
   float3 col = SH3(0) * SH_C0_DEV;
   if constexpr (DEG >= 1) if (active >= 1) {
     const float f0a = 0.4886025f;

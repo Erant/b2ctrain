@@ -1,4 +1,5 @@
 #pragma once
+#include <cuda_fp16.h>
 #include <cuda_runtime.h>
 #include <cstdio>
 #include <cstdlib>
@@ -122,5 +123,44 @@ __device__ __forceinline__ float warp_sum(float v) {
 }
 
 #endif  // __CUDACC__
+
+// Planar SH storage. Lane (k*3+ch) of splat i: the DC lanes 0..2 live in `dc[lane*stride + i]` as fp32; the higher
+// bands live in `hi` as fp16 (or in `hi32` as fp32 when the model keeps full precision), at `[(lane-3)*stride + i]`.
+struct ShBuf {
+  float* dc = nullptr;
+  __half* hi = nullptr;
+  float* hi32 = nullptr;
+  size_t stride = 0;
+#ifdef __CUDACC__
+  __device__ __forceinline__ float get(int lane, int i) const {
+    if (lane < 3) return dc[(size_t)lane * stride + i];
+    size_t o = (size_t)(lane - 3) * stride + i;
+    return hi32 ? hi32[o] : __half2float(hi[o]);
+  }
+  // Round-to-nearest store (moments, copies).
+  __device__ __forceinline__ void set(int lane, int i, float v) const {
+    if (lane < 3) { dc[(size_t)lane * stride + i] = v; return; }
+    size_t o = (size_t)(lane - 3) * stride + i;
+    if (hi32) hi32[o] = v; else hi[o] = __float2half_rn(v);
+  }
+  // Stochastically rounded store for parameters: an update smaller than half an fp16 ulp would otherwise always round
+  // away, freezing coefficients above ~0.25 under the 2e-4 SH learning rate. `u01` is uniform in [0, 1).
+  __device__ __forceinline__ void set_sr(int lane, int i, float v, float u01) const {
+    if (lane < 3) { dc[(size_t)lane * stride + i] = v; return; }
+    size_t o = (size_t)(lane - 3) * stride + i;
+    if (hi32) { hi32[o] = v; return; }
+    v = fminf(fmaxf(v, -65000.f), 65000.f);
+    __half h = __float2half_rd(v);
+    float lo = __half2float(h);
+    if (lo != v) {
+      unsigned short b = __half_as_ushort(h);
+      __half hu = __ushort_as_half(v >= 0.f ? (unsigned short)(b + 1) : (unsigned short)(b - 1));  // next toward +inf
+      float hv = __half2float(hu);
+      if (u01 * (hv - lo) < (v - lo)) h = hu;
+    }
+    hi[o] = h;
+  }
+#endif
+};
 
 }  // namespace b2c

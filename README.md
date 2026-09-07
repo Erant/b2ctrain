@@ -34,9 +34,13 @@ cmake --build build
 
 `--recipe brush` reproduces the brush fork's training dynamics (dense Adam, full resolution from step one, the floor
 baked into the scales at every refine). `--recipe fast` (default) adds sparse Adam, a progressive resolution schedule
-(1/4 -> 1/2 -> 1x over the first 40% of iterations) and a non-accumulating floor. Both produce the same splat counts.
+(1/4 -> 1/2 -> 1x over the first 40% of iterations), fp16 storage for the SH bands above DC (`--sh-fp32` to keep
+them in fp32) and a non-accumulating floor. Both produce the same splat counts.
 
 ## Bench
 
 `bench/eval_ply.py <ply> <colmap_dir>` reports mask-weighted PSNR/SSIM on training views;
 `bench/colmap_to_cameras.py` writes a `cameras.json`; `bench/polish_test.sh` reproduces b2crunner's warm-start invocation.
+`bench/b2crunner_step.py` (run with b2crunner's venv) feeds a dataset through b2crunner's real `brush` step class with
+b2ctrain as the trainer and `docker/brush-splat-render` as the rasteriser, so the cold run, the polish and the alignment
+loop are exercised exactly as the pipeline invokes them.

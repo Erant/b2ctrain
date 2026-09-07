@@ -19,9 +19,9 @@ for line in open(f"{a.colmap_dir}/cameras.txt"):
     if line.startswith("#") or not line.strip(): continue
     t = line.split(); cams[int(t[0])] = (t[1], int(t[2]), int(t[3]), [float(v) for v in t[4:]])
 images = []
-lines = [l for l in open(f"{a.colmap_dir}/images.txt") if not l.startswith("#") and l.strip()]
-for i in range(0, len(lines), 2):
-    t = lines[i].split()
+for line in open(f"{a.colmap_dir}/images.txt"):
+    t = line.split()
+    if not t or t[0].startswith("#") or len(t) < 10: continue   # comments, blank/empty POINTS2D lines
     images.append((t[9], [float(v) for v in t[1:8]], int(t[8])))
 images.sort(key=lambda x: x[0])
 images = images[::a.every]

@@ -51,14 +51,13 @@ __global__ void bake_kernel(int n, float4* __restrict__ pos, float4* __restrict_
 }
 
 template <int K3>
-__global__ void prune_flags_kernel(int n, const float4* __restrict__ pos, const float4* __restrict__ quat, const float4* __restrict__ ls, const float* __restrict__ sh, size_t stride,
+__global__ void prune_flags_kernel(int n, const float4* __restrict__ pos, const float4* __restrict__ quat, const float4* __restrict__ ls, ShBuf sb,
                                    float3 center, float max_allowed, uint32_t* __restrict__ keep, uint32_t* __restrict__ dead) {
   int i = blockIdx.x * blockDim.x + threadIdx.x;
   if (i >= n) return;
   float4 p = pos[i], q = quat[i], l = ls[i];
   bool bad = !(isfinite(p.x) && isfinite(p.y) && isfinite(p.z) && isfinite(p.w) && isfinite(q.x) && isfinite(q.y) && isfinite(q.z) && isfinite(q.w) && isfinite(l.x) && isfinite(l.y) && isfinite(l.z));
-  const float* s = sh + i;
-  for (int k = 0; k < K3; k++) bad |= !isfinite(s[k * stride]);
+  for (int k = 0; k < K3; k++) bad |= !isfinite(sb.get(k, i));
   if (!bad) {
     float o = eff_opacity(p.w, l);
     float3 sc = eff_scale(l);
@@ -101,9 +100,9 @@ __global__ void mark_kernel(int count, const uint32_t* __restrict__ idx, uint32_
 // Split each selected parent into itself + one child at slot `child_slot`.
 template <int K3>
 __global__ void split_kernel(int count, const uint32_t* __restrict__ parents, const uint32_t* __restrict__ child_slots,
-                             float4* __restrict__ pos, float4* __restrict__ quat, float4* __restrict__ ls, float* __restrict__ sh,
+                             float4* __restrict__ pos, float4* __restrict__ quat, float4* __restrict__ ls, ShBuf sb,
                              float4* __restrict__ m_pos, float4* __restrict__ v_pos, float4* __restrict__ m_q, float4* __restrict__ v_q, float4* __restrict__ m_ls, float4* __restrict__ v_ls,
-                             float* __restrict__ m_sh, float* __restrict__ v_sh, size_t stride, float* __restrict__ refine_norm, float* __restrict__ max_screen, float* __restrict__ vis_count,
+                             ShBuf msb, float* __restrict__ v_sh, float* __restrict__ refine_norm, float* __restrict__ max_screen, float* __restrict__ vis_count,
                              uint32_t* __restrict__ tile_count, uint32_t* __restrict__ last_step, float split_at_screen_size) {
   int i = blockIdx.x * blockDim.x + threadIdx.x;
   if (i >= count) return;
@@ -134,11 +133,11 @@ __global__ void split_kernel(int count, const uint32_t* __restrict__ parents, co
   pos[p] = parent; pos[c] = child;
   quat[c] = qn; quat[p] = qn;
   ls[p] = nl; ls[c] = nl;
-  for (int j = 0; j < K3; j++) sh[(size_t)j * stride + c] = sh[(size_t)j * stride + p];
+  for (int j = 0; j < K3; j++) sb.set(j, c, sb.get(j, p));
   float4 z4 = make_float4(0, 0, 0, 0);
   m_pos[p] = z4; v_pos[p] = z4; m_q[p] = z4; v_q[p] = z4; m_ls[p] = z4; v_ls[p] = z4;
   m_pos[c] = z4; v_pos[c] = z4; m_q[c] = z4; v_q[c] = z4; m_ls[c] = z4; v_ls[c] = z4;
-  for (int j = 0; j < K3; j++) { m_sh[(size_t)j * stride + p] = 0.f; m_sh[(size_t)j * stride + c] = 0.f; }
+  for (int j = 0; j < K3; j++) { msb.set(j, p, 0.f); msb.set(j, c, 0.f); }
   v_sh[p] = 0.f; v_sh[c] = 0.f;
   refine_norm[c] = 0.f; max_screen[c] = 0.f; vis_count[c] = 0.f; tile_count[c] = 0u; last_step[c] = 0u; last_step[p] = 0u;
 }
@@ -253,7 +252,7 @@ RefineStats RefineState::run(Model& m, RenderCtx& ctx, const RefineParams& p, cu
   // 1. Prune flags.
   float max_allowed = bounds.max_extent() * 100.f;
   float3 center = make_float3(bounds.center[0], bounds.center[1], bounds.center[2]);
-#define PF(K) prune_flags_kernel<K><<<div_up(n, 256), 256, 0, stream>>>(n, m.pos_op, m.quat, m.lscale, m.sh, (size_t)m.cap, center, max_allowed, keep, dead_flag)
+#define PF(K) prune_flags_kernel<K><<<div_up(n, 256), 256, 0, stream>>>(n, m.pos_op, m.quat, m.lscale, m.sh(), center, max_allowed, keep, dead_flag)
   switch (m.degree) { case 0: PF(3); break; case 1: PF(12); break; case 2: PF(27); break; case 3: PF(48); break; default: PF(75); break; }
 #undef PF
   CUDA_KERNEL_CHECK();
@@ -311,7 +310,7 @@ RefineStats RefineState::run(Model& m, RenderCtx& ctx, const RefineParams& p, cu
     if (appended) append_slots_kernel<<<div_up(appended, 256), 256, 0, stream>>>(appended, (uint32_t)n, sel_child.ptr + from_dead);
     if (m.cap > (int)ctx.tile_count.count) ctx.setup(ctx.W, ctx.H, m.cap, stream);
     if (appended) CUDA_CHECK(cudaMemsetAsync(ctx.tile_count.ptr + n, 0, appended * sizeof(uint32_t), stream));
-#define SK(K) split_kernel<K><<<div_up(n_sel, 256), 256, 0, stream>>>(n_sel, sel_parent, sel_child, m.pos_op, m.quat, m.lscale, m.sh, m.m_pos_op, m.v_pos_op, m.m_quat, m.v_quat, m.m_lscale, m.v_lscale, m.m_sh, m.v_sh, (size_t)m.cap, m.refine_norm, m.max_screen, m.vis_count, ctx.tile_count, m.last_step, p.split_at_screen_size)
+#define SK(K) split_kernel<K><<<div_up(n_sel, 256), 256, 0, stream>>>(n_sel, sel_parent, sel_child, m.pos_op, m.quat, m.lscale, m.sh(), m.m_pos_op, m.v_pos_op, m.m_quat, m.v_quat, m.m_lscale, m.v_lscale, m.m_sh(), m.v_sh, m.refine_norm, m.max_screen, m.vis_count, ctx.tile_count, m.last_step, p.split_at_screen_size)
     switch (m.degree) { case 0: SK(3); break; case 1: SK(12); break; case 2: SK(27); break; case 3: SK(48); break; default: SK(75); break; }
 #undef SK
     CUDA_KERNEL_CHECK();

@@ -68,7 +68,7 @@ int train_main(const Config& cfg) {
   const bool res_schedule = cfg.res_schedule || cfg.recipe == Recipe::Fast;
   if (res_schedule) gv.build_pyramid(3, stream);
   GpuViews gv_eval; if (!ds.eval.empty()) gv_eval.upload(ds.eval);
-  Model model; model.upload(init, stream);
+  Model model; model.sh_fp16 = cfg.sh_fp16 || (cfg.recipe == Recipe::Fast && !cfg.sh_fp32); model.upload(init, stream);
   RenderCtx ctx; ctx.setup(std::max(gv.max_w, gv_eval.max_w), std::max(gv.max_h, gv_eval.max_h), model.cap, stream);
   log_info("Loaded %zu initial splats, %zu views on GPU in %.1fs", init.n, ds.train.size(), now_seconds() - t_load);
 
@@ -145,7 +145,7 @@ int train_main(const Config& cfg) {
     timer.begin(stream);
     int vi = next_view();
     int level = 0;
-    if (res_schedule) { float pr = (float)step / (float)std::max(1u, total); level = pr < 0.15f ? 2 : (pr < 0.4f ? 1 : 0); }
+    if (res_schedule) { float pr = (float)step / (float)std::max(1u, total); level = pr < cfg.res_quarter_until ? 2 : (pr < cfg.res_half_until ? 1 : 0); }
     const ViewGPU& view = gv.lvl_views[level].empty() ? gv.views[vi] : gv.lvl_views[level][vi];
     const Camera& cam = gv.cams[vi];
     bool normals_active = cfg.normal_loss_weight > 0.f && step >= cfg.normal_loss_start_iter && ((step - cfg.normal_loss_start_iter) % cfg.normal_loss_every == 0) && view.normals != nullptr;

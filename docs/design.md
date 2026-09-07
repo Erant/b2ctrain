@@ -5,6 +5,12 @@
   `[K*3][cap]` so the projection and optimizer kernels read coefficients coalesced across threads. `lscale.w` holds the
   Mip-Splatting 3D-filter floor `f` (a frozen constant; `--recipe brush` bakes it into the scales at every refine, as the
   fork does; `--recipe fast` applies it on the fly and bakes only at export).
+- SH bands >= 1 (45 of the 48 lanes at degree 3) and their first moments are stored as fp16 in the fast recipe
+  (`ShBuf` in `util.cuh`, `--sh-fp32` keeps them in fp32; the brush recipe, the render subcommand and the tests stay
+  fp32). Parameter updates are stochastically rounded: at the 2e-4 learning rate a plain round-to-nearest store would
+  drop most updates to coefficients above ~0.25 (half an fp16 ulp there is 1.2e-4) and freeze them. Moments round to
+  nearest. This halves the largest per-splat buffer pair: optimizer 2.28 -> 1.93 ms/step, projection-side forward
+  2.28 -> 2.14 on the warm 866k model.
 - Adam moments mirror the parameter layout; the SH second moment is one scalar per splat (brush's Adam-mini style).
 - All training views are GPU resident as packed RGBA8 (premultiplied for transparent views), RGBA8 normals and u8 weights,
   plus 1/2 and 1/4 box-filtered levels when the resolution schedule is on.

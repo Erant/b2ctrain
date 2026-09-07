@@ -118,7 +118,11 @@ const std::vector<std::pair<const char*, std::vector<Opt>>>& groups() {
           if (!strcmp(v, "brush")) c.recipe = Recipe::Brush; else if (!strcmp(v, "fast")) c.recipe = Recipe::Fast;
           else fail("invalid value '%s' for '--recipe' [possible values: brush, fast]", v); }},
       {"sparse-adam", nullptr, "Only apply Adam to splats visible in the current view", B(sparse_adam)},
+      {"sh-fp16", nullptr, "Store SH bands >= 1 and their Adam moments as fp16 (stochastically rounded updates); halves the largest per-splat buffer", B(sh_fp16)},
+      {"sh-fp32", nullptr, "Keep SH bands >= 1 in fp32 (the fast recipe's default is fp16)", B(sh_fp32)},
       {"res-schedule", nullptr, "Progressive resolution schedule (1/4 -> 1/2 -> 1x) over the first 40% of iterations", B(res_schedule)},
+      {"res-quarter-until", "FRACTION", "Progress fraction at which the resolution schedule leaves 1/4 resolution [default: 0.15]", F(res_quarter_until)},
+      {"res-half-until", "FRACTION", "Progress fraction at which the resolution schedule reaches full resolution [default: 0.4]", F(res_half_until)},
       {"accumulate-min-scale", nullptr, "Bake the Mip 3D-filter floor into scales at every refine (brush's behaviour) instead of applying it on the fly", B(accumulate_min_scale)},
       {"sh-warmup-every", "N", "Unlock one SH band every N iterations (0 = all bands from the start) [default: 0]", U(sh_warmup_every)},
       {"backward", "MODE", "Rasterizer backward kernel: tc (tensor-core reduction) or warp (shuffle reduction) [default: tc]", S(backward)},

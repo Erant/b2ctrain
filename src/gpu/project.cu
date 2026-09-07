@@ -7,7 +7,7 @@ namespace {
 
 template <int DEG, int FEAT>  // FEAT: 0 none, 1 normals, 2 buffer
 __global__ void project_kernel(int n, const float4* __restrict__ pos_op, const float4* __restrict__ quat, const float4* __restrict__ lscale,
-                               const float* __restrict__ sh, int sh_stride, const float* __restrict__ feat_in, CamDev cam, bool mip,
+                               ShBuf sb, const float* __restrict__ feat_in, CamDev cam, bool mip,
                                int tiles_x, int tiles_y,
                                float4* __restrict__ proj0, float4* __restrict__ proj1, float4* __restrict__ proj2, float2* __restrict__ proj3,
                                uint32_t* __restrict__ tile_count, uint2* __restrict__ hit_info, float* __restrict__ max_screen, int active_deg) {
@@ -35,7 +35,7 @@ __global__ void project_kernel(int n, const float4* __restrict__ pos_op, const f
   float3 v = mean - campos;
   float vl = len3(v); v = v * (1.f / fmaxf(vl, 1e-12f));
   constexpr int K = (DEG + 1) * (DEG + 1);
-  float3 col = sh_eval<DEG>(sh + i, (size_t)sh_stride, v, active_deg);
+  float3 col = sh_eval<DEG>(sb, i, v, active_deg);
   float cr = col.x + 0.5f, cg = col.y + 0.5f, cb = col.z + 0.5f;
   cr = isfinite(cr) ? fminf(fmaxf(cr, -100.f), 100.f) : 0.f;
   cg = isfinite(cg) ? fminf(fmaxf(cg, -100.f), 100.f) : 0.f;
@@ -70,11 +70,11 @@ void launch_deg(RenderCtx& ctx, const Model& m, const RenderParams& p, const Cam
   float* ms = m.max_screen.ptr;
   switch (p.feat) {
     case FeatureMode::None:
-      project_kernel<DEG, 0><<<blocks, PROJ_BLOCK, 0, stream>>>(m.n, m.pos_op, m.quat, m.lscale, m.sh, m.cap, nullptr, cam, p.mip, ctx.tiles_x, ctx.tiles_y, ctx.proj0, ctx.proj1, ctx.proj2, ctx.proj3, ctx.tile_count, ctx.hit_info, ms, p.sh_degree); break;
+      project_kernel<DEG, 0><<<blocks, PROJ_BLOCK, 0, stream>>>(m.n, m.pos_op, m.quat, m.lscale, m.sh(), nullptr, cam, p.mip, ctx.tiles_x, ctx.tiles_y, ctx.proj0, ctx.proj1, ctx.proj2, ctx.proj3, ctx.tile_count, ctx.hit_info, ms, p.sh_degree); break;
     case FeatureMode::Normals:
-      project_kernel<DEG, 1><<<blocks, PROJ_BLOCK, 0, stream>>>(m.n, m.pos_op, m.quat, m.lscale, m.sh, m.cap, nullptr, cam, p.mip, ctx.tiles_x, ctx.tiles_y, ctx.proj0, ctx.proj1, ctx.proj2, ctx.proj3, ctx.tile_count, ctx.hit_info, ms, p.sh_degree); break;
+      project_kernel<DEG, 1><<<blocks, PROJ_BLOCK, 0, stream>>>(m.n, m.pos_op, m.quat, m.lscale, m.sh(), nullptr, cam, p.mip, ctx.tiles_x, ctx.tiles_y, ctx.proj0, ctx.proj1, ctx.proj2, ctx.proj3, ctx.tile_count, ctx.hit_info, ms, p.sh_degree); break;
     case FeatureMode::Buffer:
-      project_kernel<DEG, 2><<<blocks, PROJ_BLOCK, 0, stream>>>(m.n, m.pos_op, m.quat, m.lscale, m.sh, m.cap, p.feat_buffer, cam, p.mip, ctx.tiles_x, ctx.tiles_y, ctx.proj0, ctx.proj1, ctx.proj2, ctx.proj3, ctx.tile_count, ctx.hit_info, ms, p.sh_degree); break;
+      project_kernel<DEG, 2><<<blocks, PROJ_BLOCK, 0, stream>>>(m.n, m.pos_op, m.quat, m.lscale, m.sh(), p.feat_buffer, cam, p.mip, ctx.tiles_x, ctx.tiles_y, ctx.proj0, ctx.proj1, ctx.proj2, ctx.proj3, ctx.tile_count, ctx.hit_info, ms, p.sh_degree); break;
   }
   CUDA_KERNEL_CHECK();
 }
