@@ -43,6 +43,7 @@ struct RenderCtx {
   DevBuf<float4> proj0, proj1, proj2;   // (xy, c00, c01) | (c11, opac, depth, power = ln(255 opac)) | (r, g, b, feat_x)
   DevBuf<float2> proj3;                 // (feat_y, feat_z)
   DevBuf<uint32_t> tile_count, tile_off;  // per-splat hit count, inclusive scan (in depth order)
+  DevBuf<uint2> hit_info;                 // per-splat (bitmask of hit tiles within the bbox, packed bbox min_x | min_y << 12 | bw << 24); mask 0xFFFFFFFF = recompute
   DevBuf<uint32_t> depth_keys, depth_keys_sorted, order_in, order;  // per-splat depth sort
   DevBuf<uint32_t> count_perm;            // tile_count permuted into depth order
   // intersections

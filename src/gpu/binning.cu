@@ -19,36 +19,48 @@ __global__ void permute_counts_kernel(int n, const uint32_t* __restrict__ order,
 }
 
 // Emits intersections in depth order (thread r handles the r-th nearest splat); keys carry the tile id only.
-__global__ void emit_kernel(int n, const uint32_t* __restrict__ order, const uint32_t* __restrict__ tile_count, const uint32_t* __restrict__ tile_off_incl,
+__global__ void emit_kernel(int n, const uint32_t* __restrict__ order, const uint32_t* __restrict__ tile_count, const uint32_t* __restrict__ tile_off_incl, const uint2* __restrict__ hit_info,
                             const float4* __restrict__ proj0, const float4* __restrict__ proj1,
                             int tiles_x, int tiles_y, uint32_t cap,
                             uint32_t* __restrict__ keys, uint32_t* __restrict__ vals) {
   int r = blockIdx.x * blockDim.x + threadIdx.x;
   if (r >= n) return;
-  uint32_t cnt = tile_count[order[r]];
-  if (cnt == 0) return;
   int i = (int)order[r];
+  uint32_t cnt = tile_count[i];
+  if (cnt == 0) return;
   uint32_t base = tile_off_incl[r] - cnt;
   if (base + cnt > cap) return;  // overflow: host detects via total and retries with a bigger buffer
-  float4 a = proj0[i], b = proj1[i];
-  Sym2 conic{a.z, a.w, b.x};
-  float power = b.w;
-  float detc = conic.c00 * conic.c11 - conic.c01 * conic.c01;
-  float inv_detc = 1.f / detc;
-  float ex = sqrtf(2.f * power * conic.c11 * inv_detc), ey = sqrtf(2.f * power * conic.c00 * inv_detc);
-  TileBox bb = tile_bbox(a.x, a.y, ex, ey, tiles_x, tiles_y);
   uint32_t written = 0;
   uint32_t sentinel_tile = (uint32_t)(tiles_x * tiles_y);
-  for (int ty = bb.min_y; ty < bb.max_y && written < cnt; ty++)
-    for (int tx = bb.min_x; tx < bb.max_x && written < cnt; tx++) {
-      float rx = tx * (float)RT_W, ry = ty * (float)RT_W;
-      if (tile_hit(rx, ry, rx + RT_W, ry + RT_W, a.x, a.y, conic, power)) {
-        uint32_t tile = (uint32_t)(ty * tiles_x + tx);
-        keys[base + written] = tile;
-        vals[base + written] = (uint32_t)i;
-        written++;
-      }
+  uint2 hi = hit_info[i];
+  uint32_t mask = hi.x;
+  if (mask != 0xFFFFFFFFu) {
+    int min_x = (int)(hi.y & 0xFFFu), min_y = (int)((hi.y >> 12) & 0xFFFu), bw = (int)(hi.y >> 24);
+    while (mask && written < cnt) {
+      int bit = __ffs(mask) - 1; mask &= mask - 1;
+      int tx = min_x + bit % bw, ty = min_y + bit / bw;
+      keys[base + written] = (uint32_t)(ty * tiles_x + tx);
+      vals[base + written] = (uint32_t)i;
+      written++;
     }
+  } else {
+    float4 a = proj0[i], b = proj1[i];
+    Sym2 conic{a.z, a.w, b.x};
+    float power = b.w;
+    float detc = conic.c00 * conic.c11 - conic.c01 * conic.c01;
+    float inv_detc = 1.f / detc;
+    float ex = sqrtf(2.f * power * conic.c11 * inv_detc), ey = sqrtf(2.f * power * conic.c00 * inv_detc);
+    TileBox bb = tile_bbox(a.x, a.y, ex, ey, tiles_x, tiles_y);
+    for (int ty = bb.min_y; ty < bb.max_y && written < cnt; ty++)
+      for (int tx = bb.min_x; tx < bb.max_x && written < cnt; tx++) {
+        float rx = tx * (float)RT_W, ry = ty * (float)RT_W;
+        if (tile_hit(rx, ry, rx + RT_W, ry + RT_W, a.x, a.y, conic, power)) {
+          keys[base + written] = (uint32_t)(ty * tiles_x + tx);
+          vals[base + written] = (uint32_t)i;
+          written++;
+        }
+      }
+  }
   // Pad any slots the count pass promised but this pass did not fill (FP drift guard).
   for (; written < cnt; written++) { keys[base + written] = sentinel_tile; vals[base + written] = (uint32_t)i; }
 }
@@ -95,7 +107,7 @@ void bin_and_sort(RenderCtx& ctx, const Model& m, cudaStream_t stream) {
   ctx.tile_ranges.zero(stream);
   if (total == 0) return;
   // 3. Emit in depth order, then a stable sort by tile id alone keeps the depth order within each tile.
-  emit_kernel<<<div_up(n, PROJ_BLOCK), PROJ_BLOCK, 0, stream>>>(n, ctx.order, ctx.tile_count, ctx.tile_off, ctx.proj0, ctx.proj1, ctx.tiles_x, ctx.tiles_y, (uint32_t)ctx.isect_cap, ctx.keys, ctx.vals);
+  emit_kernel<<<div_up(n, PROJ_BLOCK), PROJ_BLOCK, 0, stream>>>(n, ctx.order, ctx.tile_count, ctx.tile_off, ctx.hit_info, ctx.proj0, ctx.proj1, ctx.tiles_x, ctx.tiles_y, (uint32_t)ctx.isect_cap, ctx.keys, ctx.vals);
   CUDA_KERNEL_CHECK();
   size_t tmp2 = 0;
   cub::DeviceRadixSort::SortPairs(nullptr, tmp2, ctx.keys.ptr, ctx.keys_sorted.ptr, ctx.vals.ptr, ctx.vals_sorted.ptr, (int)total, 0, ctx.tile_bits, stream);

@@ -108,11 +108,17 @@ __global__ void __launch_bounds__(128) optim_kernel(
   int i = blockIdx.x * blockDim.x + threadIdx.x;
   if (i >= n) return;
   float g[GRAD_LANES];
-  float* vs = v_splat + (size_t)i * GRAD_LANES;
-#pragma unroll
-  for (int k = 0; k < (int)GRAD_LANES; k++) { g[k] = vs[k]; vs[k] = 0.f; }
-  uint32_t vis = vis_flag[i]; vis_flag[i] = 0u;
+  uint32_t vis = vis_flag[i];
+  if (vis) vis_flag[i] = 0u;
   bool visible = vis != 0u && tile_count[i] != 0u;
+  float* vs = v_splat + (size_t)i * GRAD_LANES;
+  if (vis) {
+#pragma unroll
+    for (int k = 0; k < (int)GRAD_LANES; k++) { g[k] = vs[k]; vs[k] = 0.f; }
+  } else {
+#pragma unroll
+    for (int k = 0; k < (int)GRAD_LANES; k++) g[k] = 0.f;
+  }
   vis_count[i] += visible ? 1.f : 0.f;
   float rn = isfinite(g[9]) ? fminf(fmaxf(g[9], 0.f), 1e32f) : 0.f;
   refine_norm[i] = fmaxf(refine_norm[i], rn);

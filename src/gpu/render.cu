@@ -8,7 +8,7 @@ void RenderCtx::setup(int w, int h, int n, cudaStream_t stream) {
   depth_bits = 32 - tile_bits; if (depth_bits > 20) depth_bits = 20;
   size_t nn = (size_t)n;
   proj0.reserve(nn); proj1.reserve(nn); proj2.reserve(nn); proj3.reserve(nn);
-  tile_count.reserve(nn); tile_off.reserve(nn);
+  tile_count.reserve(nn); tile_off.reserve(nn); hit_info.reserve(nn);
   depth_keys.reserve(nn); depth_keys_sorted.reserve(nn); order_in.reserve(nn); order.reserve(nn); count_perm.reserve(nn);
   if (v_splat.count < nn * 13) { v_splat.reserve(nn * 13); v_splat.zero(stream); }
   if (vis_flag.count < nn) { vis_flag.reserve(nn); vis_flag.zero(stream); }

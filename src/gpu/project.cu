@@ -10,7 +10,7 @@ __global__ void project_kernel(int n, const float4* __restrict__ pos_op, const f
                                const float* __restrict__ sh, int sh_stride, const float* __restrict__ feat_in, CamDev cam, bool mip,
                                int tiles_x, int tiles_y,
                                float4* __restrict__ proj0, float4* __restrict__ proj1, float4* __restrict__ proj2, float2* __restrict__ proj3,
-                               uint32_t* __restrict__ tile_count, float* __restrict__ max_screen, int active_deg) {
+                               uint32_t* __restrict__ tile_count, uint2* __restrict__ hit_info, float* __restrict__ max_screen, int active_deg) {
   int i = blockIdx.x * blockDim.x + threadIdx.x;
   if (i >= n) return;
   float4 po = pos_op[i], q = quat[i], ls = lscale[i];
@@ -18,13 +18,17 @@ __global__ void project_kernel(int n, const float4* __restrict__ pos_op, const f
   if (!pr.ok) { tile_count[i] = 0; return; }
   float power = __logf(pr.opac * 255.f);
   TileBox bb = tile_bbox(pr.mean2d.x, pr.mean2d.y, pr.ex, pr.ey, tiles_x, tiles_y);
-  uint32_t hits = 0;
+  uint32_t hits = 0, mask = 0;
+  int bw = bb.max_x - bb.min_x, bh = bb.max_y - bb.min_y;
+  bool small = bw * bh <= 32;
+  int bit = 0;
   for (int ty = bb.min_y; ty < bb.max_y; ty++)
-    for (int tx = bb.min_x; tx < bb.max_x; tx++) {
+    for (int tx = bb.min_x; tx < bb.max_x; tx++, bit++) {
       float rx = tx * (float)RT_W, ry = ty * (float)RT_W;
-      if (tile_hit(rx, ry, rx + RT_W, ry + RT_W, pr.mean2d.x, pr.mean2d.y, pr.conic, power)) hits++;
+      if (tile_hit(rx, ry, rx + RT_W, ry + RT_W, pr.mean2d.x, pr.mean2d.y, pr.conic, power)) { hits++; if (small) mask |= 1u << bit; }
     }
   tile_count[i] = hits;
+  hit_info[i] = make_uint2(small ? mask : 0xFFFFFFFFu, (uint32_t)bb.min_x | ((uint32_t)bb.min_y << 12) | ((uint32_t)bw << 24));
   float3 mean = make_float3(po.x, po.y, po.z);
   float3 campos = make_float3(cam.pos[0], cam.pos[1], cam.pos[2]);
   // Colour from SH, view direction camera -> splat.
@@ -66,11 +70,11 @@ void launch_deg(RenderCtx& ctx, const Model& m, const RenderParams& p, const Cam
   float* ms = m.max_screen.ptr;
   switch (p.feat) {
     case FeatureMode::None:
-      project_kernel<DEG, 0><<<blocks, PROJ_BLOCK, 0, stream>>>(m.n, m.pos_op, m.quat, m.lscale, m.sh, m.cap, nullptr, cam, p.mip, ctx.tiles_x, ctx.tiles_y, ctx.proj0, ctx.proj1, ctx.proj2, ctx.proj3, ctx.tile_count, ms, p.sh_degree); break;
+      project_kernel<DEG, 0><<<blocks, PROJ_BLOCK, 0, stream>>>(m.n, m.pos_op, m.quat, m.lscale, m.sh, m.cap, nullptr, cam, p.mip, ctx.tiles_x, ctx.tiles_y, ctx.proj0, ctx.proj1, ctx.proj2, ctx.proj3, ctx.tile_count, ctx.hit_info, ms, p.sh_degree); break;
     case FeatureMode::Normals:
-      project_kernel<DEG, 1><<<blocks, PROJ_BLOCK, 0, stream>>>(m.n, m.pos_op, m.quat, m.lscale, m.sh, m.cap, nullptr, cam, p.mip, ctx.tiles_x, ctx.tiles_y, ctx.proj0, ctx.proj1, ctx.proj2, ctx.proj3, ctx.tile_count, ms, p.sh_degree); break;
+      project_kernel<DEG, 1><<<blocks, PROJ_BLOCK, 0, stream>>>(m.n, m.pos_op, m.quat, m.lscale, m.sh, m.cap, nullptr, cam, p.mip, ctx.tiles_x, ctx.tiles_y, ctx.proj0, ctx.proj1, ctx.proj2, ctx.proj3, ctx.tile_count, ctx.hit_info, ms, p.sh_degree); break;
     case FeatureMode::Buffer:
-      project_kernel<DEG, 2><<<blocks, PROJ_BLOCK, 0, stream>>>(m.n, m.pos_op, m.quat, m.lscale, m.sh, m.cap, p.feat_buffer, cam, p.mip, ctx.tiles_x, ctx.tiles_y, ctx.proj0, ctx.proj1, ctx.proj2, ctx.proj3, ctx.tile_count, ms, p.sh_degree); break;
+      project_kernel<DEG, 2><<<blocks, PROJ_BLOCK, 0, stream>>>(m.n, m.pos_op, m.quat, m.lscale, m.sh, m.cap, p.feat_buffer, cam, p.mip, ctx.tiles_x, ctx.tiles_y, ctx.proj0, ctx.proj1, ctx.proj2, ctx.proj3, ctx.tile_count, ctx.hit_info, ms, p.sh_degree); break;
   }
   CUDA_KERNEL_CHECK();
 }
