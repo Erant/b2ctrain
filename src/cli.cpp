@@ -26,12 +26,23 @@ uint64_t parse_u(const char* s, const char* name) {
   return (uint64_t)v;
 }
 
+std::vector<float> parse_float_list(const char* s, const char* name) {
+  std::vector<float> out; std::string cur;
+  for (const char* p = s;; p++) {
+    if (*p == ',' || *p == '\0') { if (!cur.empty()) out.push_back(parse_f(cur.c_str(), name)); cur.clear(); if (!*p) break; }
+    else cur += *p;
+  }
+  if (out.empty()) fail("invalid value '%s' for '--%s': expected a comma-separated list of numbers", s, name);
+  return out;
+}
+
 #define F(field) [](Config& c, const char* v) { c.field = parse_f(v, #field); }
 #define U(field) [](Config& c, const char* v) { c.field = (uint32_t)parse_u(v, #field); }
 #define UO(field) [](Config& c, const char* v) { c.field = (uint32_t)parse_u(v, #field); }
 #define FO(field) [](Config& c, const char* v) { c.field = parse_f(v, #field); }
 #define B(field) [](Config& c, const char*) { c.field = true; }
 #define S(field) [](Config& c, const char* v) { c.field = v; }
+#define FL(field) [](Config& c, const char* v) { c.field = parse_float_list(v, #field); }
 
 const std::vector<std::pair<const char*, std::vector<Opt>>>& groups() {
   static const std::vector<std::pair<const char*, std::vector<Opt>>> g = {
@@ -127,6 +138,11 @@ const std::vector<std::pair<const char*, std::vector<Opt>>>& groups() {
       {"sh-warmup-every", "N", "Unlock one SH band every N iterations (0 = all bands from the start) [default: 0]", U(sh_warmup_every)},
       {"backward", "MODE", "Rasterizer backward kernel: tc (tensor-core reduction) or warp (shuffle reduction) [default: tc]", S(backward)},
       {"bench", nullptr, "Print a per-kernel timing breakdown at the end", B(bench)},
+      {"align-iters", "N", "After training, run N alignment iterations in-process: render every training view, flow the pristine frame onto its render, warp it (Lanczos), refit for --align-steps with growth off and no normal loss. Replaces b2crunner's render/warp/re-invoke loop [default: 0]", U(align_iters)},
+      {"align-steps", "N", "Refit iterations per alignment pass [default: 3000]", U(align_steps)},
+      {"align-flow-sigma", "PX[,PX..]", "Gaussian smoothing of the flow field in pixels; one value, or one per alignment iteration [default: 6]", FL(align_flow_sigma)},
+      {"align-flow-cap", "PX[,PX..]", "Largest displacement applied in pixels; one value, or one per iteration [default: 6]", FL(align_flow_cap)},
+      {"align-debug-dir", "DIR", "Write alignment.json (per-iteration, per-view flow statistics) and one view's warped frame + render per iteration here (written off the training path)", S(align_debug_dir)},
       {"device", "N", "CUDA device index [default: 0]", [](Config& c, const char* v) { c.device = (int)parse_u(v, "device"); }},
       {"checkpoint-dir", "DIR", "Directory for debug dumps", S(checkpoint_dir)},
     }},

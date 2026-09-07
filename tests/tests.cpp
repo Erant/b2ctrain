@@ -10,6 +10,7 @@
 #include <cmath>
 #include <cstdlib>
 #include "reference.h"
+#include "gpu/align.h"
 
 using namespace b2c;
 
@@ -89,7 +90,70 @@ struct Harness {
 };
 
 static float g_eps = 1e-4f;
+
+// Flow + warp against a synthetic shift (the properties pipeline/align.py's tests check): a frame that agrees with its
+// render is untouched, and a frame whose texture sits two pixels off its render comes back sitting on it.
+static int test_align() {
+  const int W = 96, H = 96;
+  std::mt19937 rng(7); std::uniform_real_distribution<float> u(0.f, 255.f);
+  std::vector<float> noise(W * H), tex(W * H);
+  for (auto& v : noise) v = u(rng);
+  for (int y = 0; y < H; y++) for (int x = 0; x < W; x++) {  // 5x5 box blur: enough structure to match on, not pure noise
+    float s = 0.f; int c = 0;
+    for (int dy = -2; dy <= 2; dy++) for (int dx = -2; dx <= 2; dx++) { int xx = std::min(std::max(x + dx, 0), W - 1), yy = std::min(std::max(y + dy, 0), H - 1); s += noise[yy * W + xx]; c++; }
+    tex[y * W + x] = s / c;
+  }
+  auto pixel = [&](int x, int y) {  // r = tex, g = tex rolled 3 rows, b = tex rolled 3 columns (as the Python fixture)
+    unsigned r = (unsigned)tex[y * W + x], g = (unsigned)tex[((y + H - 3) % H) * W + x], b = (unsigned)tex[y * W + (x + W - 3) % W];
+    return r | (g << 8) | (b << 16) | (255u << 24);
+  };
+  std::vector<uint32_t> frame(W * H);
+  for (int y = 0; y < H; y++) for (int x = 0; x < W; x++) frame[y * W + x] = pixel(x, y);
+  auto as_render = [&](int shift) {  // np.roll(frame, shift, axis=1) as float4 on grey (alpha is 255 everywhere)
+    std::vector<float4> r(W * H);
+    for (int y = 0; y < H; y++) for (int x = 0; x < W; x++) { uint32_t p = frame[y * W + (x - shift + W) % W]; r[y * W + x] = make_float4((p & 255) / 255.f, ((p >> 8) & 255) / 255.f, ((p >> 16) & 255) / 255.f, 1.f); }
+    return r;
+  };
+  auto diff = [&](const std::vector<uint32_t>& a, const std::vector<float4>& b) {  // mean |a - b| over the interior, per channel
+    double s = 0; int c = 0;
+    for (int y = 8; y < H - 8; y++) for (int x = 8; x < W - 8; x++) { uint32_t p = a[y * W + x]; float4 q = b[y * W + x];
+      s += std::abs((p & 255) - q.x * 255.f) + std::abs(((p >> 8) & 255) - q.y * 255.f) + std::abs(((p >> 16) & 255) - q.z * 255.f); c += 3; }
+    return s / c;
+  };
+  DevBuf<uint32_t> d_frame, d_out; d_frame.upload(frame); d_out.reserve(W * H);
+  DevBuf<float4> d_render;
+  AlignScratch scratch;
+  int fails = 0;
+  {
+    auto render = as_render(0); d_render.upload(render);
+    AlignStats st = align_view_gpu(scratch, d_frame, d_render, W, H, 6.f, 6.f, d_out, 0);
+    auto out = d_out.download(W * H);
+    bool same = out == frame;
+    printf("align identity: mean %.4f px, warped %s the frame\n", st.mean, same ? "==" : "!=");
+    if (!same || st.mean > 1e-3f) fails++;
+  }
+  {
+    auto render = as_render(2); d_render.upload(render);
+    AlignStats st = align_view_gpu(scratch, d_frame, d_render, W, H, 6.f, 6.f, d_out, 0);
+    auto out = d_out.download(W * H);
+    double before = diff(frame, render), after = diff(out, render);
+    printf("align shift 2: measured %.3f px mean (p90 %.3f), residual %.2f -> %.2f\n", st.mean, st.p90, before, after);
+    if (std::abs(st.mean - 2.f) > 0.6f || after > before / 2) fails++;
+  }
+  {
+    auto render = as_render(5); d_render.upload(render);
+    AlignStats st = align_view_gpu(scratch, d_frame, d_render, W, H, 6.f, 1.f, d_out, 0);  // cap 1 px: measured 5, applied <= 1
+    auto out = d_out.download(W * H);
+    auto one = as_render(1);
+    double to_render = diff(out, render), to_one = diff(out, one);
+    printf("align cap: measured %.3f px, warped is %.2f from the render and %.2f from a 1 px shift\n", st.mean, to_render, to_one);
+    if (st.mean < 3.f || to_one > to_render) fails++;
+  }
+  return fails;
+}
+
 int main(int argc, char** argv) {
+  int align_fails = test_align();
   if (argc > 1) g_eps = (float)atof(argv[1]);
   int fails = 0, total = 0, skipped = 0;
   for (int cfg = 0; cfg < 6; cfg++) {
@@ -132,5 +196,6 @@ int main(int argc, char** argv) {
     printf("cfg %d (%s%s%s): checked %d params, max rel err %.4f\n", cfg, masked ? "masked" : "transparent", normals ? "+normals" : "", tc ? " tc" : " warp", checked, max_rel);
   }
   printf("%d / %d mismatches (%d non-smooth points skipped)\n", fails, total, skipped);
-  return fails == 0 ? 0 : 1;
+  if (align_fails) printf("%d alignment test failure(s)\n", align_fails);
+  return (fails == 0 && align_fails == 0) ? 0 : 1;
 }

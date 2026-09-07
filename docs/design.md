@@ -39,15 +39,35 @@
    (equivalent in distribution to brush's multinomial without replacement), splits with brush's covariance-aware rule,
    decays opacity, recomputes the 80th-percentile bounds and the floor on the GPU.
 
-## Measured on the RTX 4070 Ti (2026-09-06)
-| dataset | brush fork | b2ctrain `--recipe brush` | b2ctrain `--recipe fast` |
-|---|---|---|---|
-| stage 2 (135 views 720p, normals, mixed alpha) | 9m41s, 837k, 35.83 dB | 2m50s, 837k, 36.16 dB | 2m28s, 854k, 36.75 dB |
-| stage 5 (81 views 1080p) | 6m47s, 356k, 32.88 dB | 2m10s, 350k, 32.29 dB | 1m39s, 358k, 32.71 dB |
+## Alignment loop (`src/gpu/align.cu`, `--align-iters`)
+b2crunner's stage-5 loop — render the training views, DIS-flow each pristine frame onto its render, smooth (sigma 6 px),
+zero outside the subject, cap (6 px), Lanczos-warp, refit 3000 steps with growth off — ported in-process. The flow is a
+dense coarse-to-fine Lucas-Kanade (4 levels, 9x9 windows, 4 Gauss-Newton iterations per level, Levenberg damping, at
+most 1 px per iteration) rather than DIS: after the sigma-6 blur only the low-frequency displacement survives, and the
+synthetic tests (`tests/tests.cpp`: fixed point exact, 2 px shift measured at 2.00 px and warped to zero residual, cap
+respected) hold. Frames are warped premultiplied (they are stored premultiplied), which is the correct way to resample
+RGBA anyway. Statistics match `align.py` (mean and p90 of the smoothed, uncapped magnitude over the subject).
+A refit is what a fresh warm-started invocation was: optimizer state and Adam step reset, LR schedule restarted over
+`align_steps`, floor re-attached, bounds recomputed from the model, full resolution. Evidence is measured against the
+warped frames, as the last pipeline invocation did. Cost per alignment pass at 81 views of 1080x1920: 0.7 s.
 
-Lessons: 8x8 raster tiles cut fragment work ~3x for tiny-splat scenes; the optimizer is DRAM-bound (~1.2 KB per visible
-splat per step); a lane-parallel SH update was slower than the fused per-splat kernel; merging the loss channels into one
-block was slower than three blocks (occupancy).
+## Measured on the RTX 4070 Ti (2026-09-07, same argv as b2crunner's steps)
+| dataset | brush fork | b2ctrain `--recipe fast --sh-fp32` | b2ctrain `--recipe fast` (default, fp16 SH) |
+|---|---|---|---|
+| stage 2 (135 views 720p, normals, mixed alpha, alpha weight 0.5) | 9m41s, 837k, 35.83 dB | 2m29s, 871k, 36.96 dB | 2m18s, 887k, 37.13 dB |
+| stage 5 (81 views 1080p, alpha weight 0.1, no normals) | 6m47s, 356k, 32.88 dB (older argv) | 1m40s, 364k, 34.23 dB | 1m39s, 389k, 34.47 dB |
+
+Resolution-schedule lever (stage 2, fp16): `--res-quarter-until 0.25 --res-half-until 0.6` gives 1m59s at 37.00 dB but
+747k splats (11% under brush); the default stays at 0.15 / 0.4.
+
+Kernel breakdown at HEAD (nsys, warm 866k stage-2 model, ms/step): optimizer 1.94, tensor-core backward 1.70,
+forward raster 0.78, projection 0.56, radix sorts 0.38, photometric loss 0.27, intersection emit 0.27; 6.0 ms total
+against 6.07 ms wall, so the GPU is idle ~1% and launch overhead is not a lever.
+
+Lessons: 8x8 raster tiles cut fragment work ~3x for tiny-splat scenes; the optimizer is DRAM-bound (~0.9 KB per visible
+splat per step after fp16 SH); a lane-parallel SH update was slower than the fused per-splat kernel; merging the loss
+channels into one block was slower than three blocks (occupancy); replacing the backward's vectorised shared-memory
+zeroing pass with unconditional per-fragment stores was slower (1.70 -> 1.78 ms).
 
 ## Validation
 - `tests/b2c_tests`: gradients of every parameter group against central differences of a double-precision CPU

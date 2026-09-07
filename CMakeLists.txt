@@ -35,6 +35,7 @@ add_library(b2c_core STATIC
   src/gpu/optim.cu
   src/gpu/refine.cu
   src/gpu/images.cu
+  src/gpu/align.cu
   src/train/trainer.cpp
   src/train/init.cpp
   src/train/evidence.cu

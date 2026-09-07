@@ -60,6 +60,10 @@ struct Config {
   bool accumulate_min_scale = false;  // brush quirk: bake floor at every refine
   uint32_t sh_warmup_every = 0;       // 0 = all bands from step 1 (brush)
   bool bench = false;
+  // In-trainer alignment loop (b2crunner's render -> flow -> warp -> refit, without leaving the process).
+  uint32_t align_iters = 0, align_steps = 3000;
+  std::vector<float> align_flow_sigma{6.f}, align_flow_cap{6.f};  // one entry, or one per iteration
+  std::string align_debug_dir;
   std::string backward = "tc";       // tc | warp
   int device = 0;
   std::string checkpoint_dir;         // debug dumps

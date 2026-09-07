@@ -37,6 +37,18 @@ baked into the scales at every refine). `--recipe fast` (default) adds sparse Ad
 (1/4 -> 1/2 -> 1x over the first 40% of iterations), fp16 storage for the SH bands above DC (`--sh-fp32` to keep
 them in fp32) and a non-accumulating floor. Both produce the same splat counts.
 
+## Alignment loop
+
+`--align-iters N` runs b2crunner's alignment loop (`pipeline/steps/brush.py`, `pipeline/align.py`) inside the trainer:
+after the main run, every transparent training view is rendered with the current model on grey, the *pristine* frame
+is flowed onto its render (coarse-to-fine Lucas-Kanade on the GPU), the flow is smoothed (`--align-flow-sigma`),
+zeroed outside the subject and capped (`--align-flow-cap`), the frame is Lanczos-warped by it, and the model is refit
+for `--align-steps` iterations on the warped set with a fresh optimizer and learning-rate schedule, growth and
+refinement off, normal loss off. Nothing leaves the GPU between iterations: no .ply export/reload, no frames written,
+no renderer process. `--align-debug-dir` writes `alignment.json` (per-iteration, per-view mean/p90 displacement in
+pixels) and one view's warped frame + render per iteration, encoded on a background thread off the training path.
+The refit's warm start also holds for `init.ply` runs: a warm start trains at full resolution (no progressive schedule).
+
 ## Bench
 
 `bench/eval_ply.py <ply> <colmap_dir>` reports mask-weighted PSNR/SSIM on training views;
