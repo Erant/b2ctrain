@@ -53,7 +53,7 @@ const char* HELP =
 "      --evidence-normal-weight <W>     Weight of the normal-map residual in the evidence residual [default: 0.0]\n"
 "      --write-evidence <PLY>           After measuring evidence from --dataset, write the splat with ev_* properties here\n"
 "      --conf-tau <TAU>                 [default: 0.08]\n"
-"      --conf-min-views <MIN_VIEWS>     [default: 4]\n"
+"      --conf-min-views <MIN_VIEWS>     Effective supporting views (ev_views, the participation ratio of the per-view in-mask mass) for full support [default: 4]\n"
 "      --conf-inmask-lo <INMASK_LO>     [default: 0.3]\n"
 "      --conf-inmask-hi <INMASK_HI>     [default: 0.8]\n"
 "      --conf-angle-margin <DEG>        [default: 30]\n"

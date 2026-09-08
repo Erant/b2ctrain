@@ -120,6 +120,23 @@ The full-resolution phase on the warm ~880k model is ~70% of stage-2 wall time. 
 --res-half-until 0.6` (default 0.15 / 0.4) gives 1m59s at 37.00 dB — 4.9x brush — but 747k splats, 11% under
 brush's 837k, and the sharpness metric b2crunner judges by was not measured. Left at the default; the knobs exist.
 
+### Confidence gate: culled speckles along the face cap's rim (2026-09-07, evening)
+
+A real run's re-render showed black (culled) speckles along the hairline, nose and jaw — the rim of the face cap, where
+`face_priority_weights` ramps the denoised frames' weight and the cap's own mask fades. Reproduced on
+`splat/colmap_intermediate` with the stage-2 export: 10% of the pixels in the weight-ramp band culled at the anchor
+view, 1% of the face. Not a compositing problem: with every confidence term disabled the band stayed culled at
+accumulated alpha 1.0. The cause is brush's support count (ported as-is): a view counted as supporting a splat only
+when the splat drew >= 1 pixel-weight of in-mask mass in it, so 66% of the splats had zero supporting views and zero
+confidence, and any pixel whose visibility is carried by such fine splats is culled. The ramp is where the fit is made
+of fine splats (both sources attenuated, disagreement fitted in detail). `ev_views` is now the participation ratio of
+the per-view mass, `(sum w)^2 / sum w^2` — an effective view count that is scale-free (1 for one view whatever the
+mass, N for N equal views, a faint tail over many views barely moves it). Same 7-column `ev_*` block, so nothing in
+b2crunner changes; the pipeline's `--conf-min-views 4` keeps its meaning. Measured (rationale and numbers in
+`src/train/evidence.cu`): rim 10% -> 0%, face 1% -> 0%, subject 4.2% -> 3.1%; at a view 25 degrees above the orbit
+the culled fraction of opaque pixels 3.4% -> 0.5% (the black patches on the specular top go too); far-outside
+floater pixels kept 18 -> 36 per 720x1280 frame, i.e. unchanged in practice. Gradient tests pass (0/1156).
+
 ## What's left
 
 - **Commit the b2crunner side.** Its working tree (`~/Projects/b2crunner`) has uncommitted changes from this work in

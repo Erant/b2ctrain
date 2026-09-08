@@ -19,7 +19,7 @@ struct SplatCloud {
   std::vector<float> sh;         // [n][K][3] coefficient-major
   bool has_scales = true;        // false when scales must be initialised (kNN)
   bool has_evidence = false;
-  std::vector<float> evidence;   // [n][7]: w_in, w_all, err, views, dir xyz
+  std::vector<float> evidence;   // [n][7]: w_in, w_all, err, views (effective count, see evidence.cu), dir xyz
 
   int K() const { return sh_coeffs_for_degree(sh_degree); }
   void resize(size_t count, int degree);

@@ -28,7 +28,8 @@ cmake --build build
 - Refinement: brush's recipe on the GPU (prune, relocation and growth by Gumbel-top-k weighted sampling, covariance-aware
   split, opacity decay, Mip-Splatting 3D filter floor).
 - Evidence export (`--export-evidence`, `--evidence-prune-inmask`, `--evidence-normal-weight`) and confidence-gated
-  rendering (`b2ctrain render --confidence ...`) matching brush-splat-render's output contract.
+  rendering (`b2ctrain render --confidence ...`) matching brush-splat-render's output contract. `ev_views` is an
+  effective (participation-ratio) view count rather than brush's thresholded one; see `src/train/evidence.cu`.
 
 ## Recipes
 

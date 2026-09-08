@@ -3,7 +3,23 @@
 
 namespace b2c {
 
-static DevBuf<float> g_evidence;   // [n][7]
+// Internal accumulator: the exported 7 (w_in, w_all, err, views, dir xyz) plus sum over views of w_in_v^2, from
+// which `views` is derived at download as the participation ratio (sum w_in_v)^2 / sum w_in_v^2 -- the effective
+// number of views the in-mask mass is spread over. brush counted a view only when it gave the splat >= 1 pixel-weight
+// of mass (VIEW_MIN_MASS), which is scale-dependent: a small splat that draws 0.3 of a pixel in every one of 100
+// views never counted a single view and was fully distrusted however well it agreed; where the fit was made of such
+// splats (the face-priority weight ramp, where the cap and the denoised frames are both attenuated and the trainer
+// fits the disagreement with fine splats) the confidence gate culled the pixels. Measured on the stage-2 example
+// (2026-09-07, 865k splats, 135 views): 66% of the splats had w_in > 0 and views == 0 and 81% had views < 4; with
+// the ratio, 0% and 18%. Culled pixels along the face's rim 10% -> 0%, in the face 1% -> 0%, over the whole subject
+// 4.2% -> 3.1% at the anchor view and 3.4% -> 0.5% of the opaque pixels at a view elevated 25 degrees off the orbit
+// (the black patches on the specular top). Kept background pixels more than 10 px outside the silhouette: 18 -> 36
+// of a 720x1280 frame; the rest of the +12% in kept-outside pixels sits within 10 px of the matte edge. The ratio is
+// 1 for a splat seen in one view whatever its mass, N for one seen equally in N views, and a faint tail across many
+// views barely moves it (10 in one view + 0.001 in 99 others -> 1.02), which is the floater case the threshold
+// existed for.
+constexpr int EV_ACC = 8;
+static DevBuf<float> g_evidence;   // [n][EV_ACC]
 static DevBuf<float> g_view_acc;   // [n][3] per-view (w_in, err, w_all)
 
 namespace {
@@ -91,9 +107,9 @@ __global__ void fold_view_kernel(int n, const float* __restrict__ acc, const flo
   int i = blockIdx.x * blockDim.x + threadIdx.x;
   if (i >= n) return;
   float w_in = acc[i * 3], err = acc[i * 3 + 1], w_all = acc[i * 3 + 2];
-  float* e = ev + (size_t)i * 7;
+  float* e = ev + (size_t)i * EV_ACC;
   e[0] += w_in; e[1] += w_all; e[2] += err;
-  if (w_in > 1.f) e[3] += 1.f;
+  e[7] += w_in * w_in;
   if (w_in != 0.f) {
     float4 p = pos[i];
     float3 d = make_float3(cam.x - p.x, cam.y - p.y, cam.z - p.z);
@@ -105,7 +121,7 @@ __global__ void fold_view_kernel(int n, const float* __restrict__ acc, const flo
 }  // namespace
 
 void compute_evidence(RenderCtx& ctx, const Model& m, const std::vector<ViewGPU>& views, const std::vector<Camera>& cams, const Config& cfg, cudaStream_t stream) {
-  g_evidence.reserve((size_t)m.n * 7); g_evidence.zero(stream);
+  g_evidence.reserve((size_t)m.n * EV_ACC); g_evidence.zero(stream);
   g_view_acc.reserve((size_t)m.n * 3);
   bool use_normals = cfg.evidence_normal_weight > 0.f;
   for (size_t v = 0; v < views.size(); v++) {
@@ -131,8 +147,17 @@ void compute_evidence(RenderCtx& ctx, const Model& m, const std::vector<ViewGPU>
 }
 
 std::vector<float> download_evidence(const Model& m, cudaStream_t stream) {
-  if (g_evidence.count < (size_t)m.n * 7) return std::vector<float>((size_t)m.n * 7, 0.f);
-  return g_evidence.download((size_t)m.n * 7, stream);
+  std::vector<float> out((size_t)m.n * 7, 0.f);
+  if (g_evidence.count < (size_t)m.n * EV_ACC) return out;
+  std::vector<float> acc = g_evidence.download((size_t)m.n * EV_ACC, stream);
+  for (size_t i = 0; i < (size_t)m.n; i++) {
+    const float* a = &acc[i * EV_ACC];
+    float* e = &out[i * 7];
+    e[0] = a[0]; e[1] = a[1]; e[2] = a[2];
+    e[3] = a[7] > 0.f ? (a[0] * a[0]) / a[7] : 0.f;  // effective number of supporting views
+    e[4] = a[4]; e[5] = a[5]; e[6] = a[6];
+  }
+  return out;
 }
 
 }  // namespace b2c
