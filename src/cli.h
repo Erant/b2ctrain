@@ -64,11 +64,16 @@ struct Config {
   uint32_t align_iters = 0, align_steps = 3000;
   std::vector<float> align_flow_sigma{6.f}, align_flow_cap{6.f};  // one entry, or one per iteration
   std::string align_debug_dir;
+  std::string align_warp = "frames";  // frames: Lanczos-warp the pristine frames onto the render; render: move the projected splats onto the frames
   std::string backward = "tc";       // tc | warp
   // Hollow loss: a body proxy mesh (dataset's mesh.ply, or --mesh) gives every training pixel a reference surface
   // depth; splat weight arriving from behind it is penalised, and the gradient of that weight through the
   // fragments in front is what pushes the front surface opaque.
   std::string mesh;                   // explicit mesh path (default: <dataset>/mesh.ply if present)
+  std::string body_rig;               // per-view articulated deformation rig (gpu/deform.h), empty = off
+  uint32_t body_rig_start_iter = 1000;   // learn the per-view rotations from this iteration of the main run on
+  float body_rig_lr = 2e-3f, body_rig_smooth = 0.05f, body_rig_zero = 0.02f;
+  bool body_rig_global_moment = false;
   float hollow_weight = 0.f;          // 0 = off
   float hollow_margin = 0.05f;        // scene units behind the surface where the penalty starts (full at 2x)
   uint32_t hollow_dilate = 2;         // px: reference depth is the farthest surface within this radius

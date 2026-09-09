@@ -11,6 +11,8 @@
 #include <cstdlib>
 #include "reference.h"
 #include "gpu/align.h"
+#include "gpu/deform.h"
+#include <cstdio>
 
 using namespace b2c;
 
@@ -147,6 +149,18 @@ static int test_align() {
     if (std::abs(st.mean - 2.f) > 0.6f || after > before / 2) fails++;
   }
   {
+    auto render = as_render(2); d_render.upload(render);
+    const int gw = align_warp_dim(W), gh = align_warp_dim(H);
+    DevBuf<float2> d_grid; d_grid.reserve((size_t)gw * gh);
+    AlignStats st = align_view_gpu(scratch, d_frame, d_render, W, H, 6.f, 6.f, nullptr, 0, d_grid);  // render-side: grid only
+    auto grid = d_grid.download((size_t)gw * gh);
+    double sx = 0, sy = 0; int c = 0;
+    for (int y = 2; y < gh - 2; y++) for (int x = 2; x < gw - 2; x++) { sx += grid[y * gw + x].x; sy += grid[y * gw + x].y; c++; }
+    sx /= c; sy /= c;
+    printf("align grid: %dx%d cells, interior mean (%.3f, %.3f) px for a 2 px shift (measured %.3f)\n", gw, gh, sx, sy, st.mean);
+    if (std::abs(sx - 2.0) > 0.6 || std::abs(sy) > 0.3) fails++;
+  }
+  {
     auto render = as_render(5); d_render.upload(render);
     AlignStats st = align_view_gpu(scratch, d_frame, d_render, W, H, 6.f, 1.f, d_out, 0);  // cap 1 px: measured 5, applied <= 1
     auto out = d_out.download(W * H);
@@ -158,8 +172,60 @@ static int test_align() {
   return fails;
 }
 
+// Articulated deformation: a chain root -> j1 -> j2 with j1 active; a 90-degree rotation about j1's pivot moves a
+// point bound to j2 as expected; a gradient on that point produces the torque r x g about j1, and Adam's first step
+// on the rotation follows it (Adam: lr * sign).
+static int test_deform() {
+  const char* path = "/tmp/b2c_test_rig.bin";
+  {
+    FILE* f = fopen(path, "wb");
+    fwrite("B2CRIG2\0", 1, 8, f);
+    int32_t hdr[6] = {2, 3, 1, 4, 64, 1}; fwrite(hdr, sizeof(hdr), 1, f);
+    float verts[6] = {0.f, 2.5f, 0.f, 0.f, 0.5f, 0.f}; fwrite(verts, sizeof(verts), 1, f);
+    int32_t vj[8] = {2, 0, 0, 0, 0, 0, 0, 0}; fwrite(vj, sizeof(vj), 1, f);
+    float vw[8] = {1.f, 0.f, 0.f, 0.f, 1.f, 0.f, 0.f, 0.f}; fwrite(vw, sizeof(vw), 1, f);
+    char name[64] = "view0.png"; fwrite(name, 64, 1, f);
+    int32_t parents[3] = {-1, 0, 1}; fwrite(parents, sizeof(parents), 1, f);
+    float jpos[9] = {0.f, 0.f, 0.f, 0.f, 1.f, 0.f, 0.f, 2.f, 0.f}; fwrite(jpos, sizeof(jpos), 1, f);
+    int32_t active[1] = {1}; fwrite(active, sizeof(active), 1, f);
+    fclose(f);
+  }
+  BodyRig rig;
+  if (!rig.load(path)) { printf("deform: cannot load the test rig\n"); return 1; }
+  SplatCloud c; c.resize(2, 0);
+  float pos[6] = {0.f, 2.5f, 0.f, 0.f, 0.5f, 0.f};
+  for (int i = 0; i < 2; i++) { for (int k = 0; k < 3; k++) { c.pos[i * 3 + k] = pos[i * 3 + k]; c.log_scale[i * 3 + k] = -3.f; } c.quat[i * 4] = 1.f; c.opacity[i] = 0.5f; }
+  Model m; m.upload(c);
+  rig.bind(m, 0);
+  const float half_pi = 1.57079633f;
+  std::vector<float3> om(3, make_float3(0.f, 0.f, 0.f)); om[1] = make_float3(0.f, 0.f, half_pi);
+  rig.omega.upload(om);
+  rig.pose(0, m, 0);
+  auto pv = rig.pos_view.download(2);
+  int fails = 0;
+  // (0, 2.5, 0) about pivot (0, 1, 0) by +90 deg around z: r = (0, 1.5, 0) -> (-1.5, 0, 0) -> (-1.5, 1, 0); the root-bound point stays
+  bool ok0 = std::abs(pv[0].x + 1.5f) < 1e-4f && std::abs(pv[0].y - 1.f) < 1e-4f && std::abs(pv[0].z) < 1e-4f && std::abs(pv[0].w - 0.5f) < 1e-6f;
+  bool ok1 = std::abs(pv[1].x) < 1e-6f && std::abs(pv[1].y - 0.5f) < 1e-6f;
+  printf("deform pose: bound point -> (%.3f, %.3f, %.3f) %s, root point %s\n", pv[0].x, pv[0].y, pv[0].z, ok0 ? "ok" : "WRONG", ok1 ? "unmoved" : "MOVED");
+  if (!ok0 || !ok1) fails++;
+  // torque, at a 0.3 rad rotation (the update clamps rotations to 0.6 rad): g = (0, 1, 0) on the bound point gives
+  // r x g = (0, 0, r.x) with r.x = -1.5 sin 0.3 < 0, so Adam's first step (lr * sign) raises omega_z by lr
+  om[1] = make_float3(0.f, 0.f, 0.3f); rig.omega.upload(om);
+  rig.pose(0, m, 0);
+  std::vector<float3> g = {make_float3(0.f, 1.f, 0.f), make_float3(0.f, 0.f, 0.f)};
+  rig.g_pos.upload(g);
+  rig.update(0, m, 1e-3f, 0.f, 0.f, false, 0);
+  auto om2 = rig.download_omega(0);
+  bool ok2 = std::abs(om2[1].z - (0.3f + 1e-3f)) < 1e-5f && std::abs(om2[1].x) < 1e-6f && std::abs(om2[1].y) < 1e-6f && om2[0].z == 0.f && om2[2].z == 0.f;
+  printf("deform torque: omega_z %.6f (expected %.6f), inactive joints untouched %s\n", om2[1].z, 0.3f + 1e-3f, ok2 ? "yes" : "NO");
+  if (!ok2) fails++;
+  return fails;
+}
+
 int main(int argc, char** argv) {
   int align_fails = test_align();
+  int deform_fails = test_deform();
+  if (deform_fails) printf("deform: %d failure(s)\n", deform_fails);
   if (argc > 1) g_eps = (float)atof(argv[1]);
   int fails = 0, total = 0, skipped = 0;
   for (int cfg = 0; cfg < 9; cfg++) {
@@ -208,5 +274,5 @@ int main(int argc, char** argv) {
   }
   printf("%d / %d mismatches (%d non-smooth points skipped)\n", fails, total, skipped);
   if (align_fails) printf("%d alignment test failure(s)\n", align_fails);
-  return (fails == 0 && align_fails == 0) ? 0 : 1;
+  return (fails == 0 && align_fails == 0 && deform_fails == 0) ? 0 : 1;
 }

@@ -1,4 +1,5 @@
 #include "train/evidence.h"
+#include "gpu/deform.h"
 #include "gpu/splat_math.cuh"
 
 namespace b2c {
@@ -120,7 +121,8 @@ __global__ void fold_view_kernel(int n, const float* __restrict__ acc, const flo
 
 }  // namespace
 
-void compute_evidence(RenderCtx& ctx, const Model& m, const std::vector<ViewGPU>& views, const std::vector<Camera>& cams, const Config& cfg, cudaStream_t stream) {
+void compute_evidence(RenderCtx& ctx, const Model& m, const std::vector<ViewGPU>& views, const std::vector<Camera>& cams, const Config& cfg, cudaStream_t stream,
+                      BodyRig* rig, const std::vector<int>* rig_views) {
   g_evidence.reserve((size_t)m.n * EV_ACC); g_evidence.zero(stream);
   g_view_acc.reserve((size_t)m.n * 3);
   bool use_normals = cfg.evidence_normal_weight > 0.f;
@@ -128,6 +130,8 @@ void compute_evidence(RenderCtx& ctx, const Model& m, const std::vector<ViewGPU>
     const ViewGPU& view = views[v];
     if (view.W != ctx.W || view.H != ctx.H) ctx.setup(view.W, view.H, m.cap, stream);
     RenderParams rp; rp.cam = CameraGPU::from(cams[v], view.W, view.H);
+    rp.warp = view.warp; rp.warp_w = view.warp_w; rp.warp_h = view.warp_h;
+    if (rig && rig_views && (*rig_views)[v] >= 0) { rig->pose((*rig_views)[v], m, stream); rp.pos_override = rig->pos_view; }
     rp.sh_degree = m.degree; rp.bwd_info = true;
     rp.feat = (use_normals && view.normals) ? FeatureMode::Normals : FeatureMode::None;
     render_forward(ctx, m, rp, stream);

@@ -162,6 +162,16 @@ __global__ void warp_kernel(const uint32_t* __restrict__ src, int w, int h, cons
   dst[y * w + x] = out;
 }
 
+// Box average of the field over ALIGN_WARP_DOWN x ALIGN_WARP_DOWN blocks (edge blocks over what exists).
+__global__ void down_flow_kernel(const float2* __restrict__ src, int w, int h, float2* __restrict__ dst, int dw, int dh) {
+  int x = blockIdx.x * blockDim.x + threadIdx.x, y = blockIdx.y * blockDim.y + threadIdx.y;
+  if (x >= dw || y >= dh) return;
+  float2 acc = make_float2(0.f, 0.f); int c = 0;
+  for (int dy = 0; dy < ALIGN_WARP_DOWN; dy++) { int sy = y * ALIGN_WARP_DOWN + dy; if (sy >= h) break;
+    for (int dx = 0; dx < ALIGN_WARP_DOWN; dx++) { int sx = x * ALIGN_WARP_DOWN + dx; if (sx >= w) break; float2 v = src[sy * w + sx]; acc.x += v.x; acc.y += v.y; c++; } }
+  dst[y * dw + x] = c ? make_float2(acc.x / c, acc.y / c) : make_float2(0.f, 0.f);
+}
+
 dim3 grid2(int w, int h) { return dim3((w + 15) / 16, (h + 15) / 16); }
 
 }  // namespace
@@ -181,7 +191,7 @@ void AlignScratch::setup(int W, int H) {
 }
 
 AlignStats align_view_gpu(AlignScratch& s, const uint32_t* frame, const float4* render, int W, int H, float sigma, float cap,
-                          uint32_t* dst, cudaStream_t stream) {
+                          uint32_t* dst, cudaStream_t stream, float2* warp_out) {
   if (s.levels == 0 || s.lw[0] != W || s.lh[0] != H) s.setup(W, H);
   const int n = W * H;
   gray_frame_kernel<<<div_up(n, 256), 256, 0, stream>>>(frame, n, s.ga[0]);
@@ -230,7 +240,8 @@ AlignStats align_view_gpu(AlignScratch& s, const uint32_t* frame, const float4* 
   }
   s.hist.zero(stream);
   cap_stats_kernel<<<div_up(n, 256), 256, 0, stream>>>(frame, n, cap, s.flow, s.hist);
-  warp_kernel<<<grid2(W, H), dim3(16, 16), 0, stream>>>(frame, W, H, s.flow, dst);
+  if (dst) warp_kernel<<<grid2(W, H), dim3(16, 16), 0, stream>>>(frame, W, H, s.flow, dst);
+  if (warp_out) { int dw = align_warp_dim(W), dh = align_warp_dim(H); down_flow_kernel<<<grid2(dw, dh), dim3(16, 16), 0, stream>>>(s.flow, W, H, warp_out, dw, dh); }
   CUDA_KERNEL_CHECK();
   CUDA_CHECK(cudaMemcpyAsync(s.h_hist.ptr, s.hist.ptr, (HIST_BINS + 2) * sizeof(float), cudaMemcpyDeviceToHost, stream));
   CUDA_CHECK(cudaStreamSynchronize(stream));

@@ -145,9 +145,10 @@ __global__ void __launch_bounds__(128) optim_kernel(
   float3 vc = make_float3(0.f, 0.f, 0.f);
 
   if (any) {
-    ProjIntermediates pr = project_one(po, q, ls, cam, op.mip);
+    const float4 pv = op.pos_override ? op.pos_override[i] : po;
+    ProjIntermediates pr = project_one(pv, q, ls, cam, op.mip);
     if (pr.ok) {
-      float3 mean = make_float3(po.x, po.y, po.z);
+      float3 mean = make_float3(pv.x, pv.y, pv.z);
       float3 campos = make_float3(cam.pos[0], cam.pos[1], cam.pos[2]);
       // SH
       float3 u = mean - campos; float ul = len3(u); float3 v = u * (1.f / ul);
@@ -246,6 +247,7 @@ __global__ void __launch_bounds__(128) optim_kernel(
     }
   }
 
+  if (op.g_pos_out) op.g_pos_out[i] = g_pos;
   if (op.grad_out) {
     float* o = op.grad_out + (size_t)i * (11 + K * 3);
     o[0] = g_pos.x; o[1] = g_pos.y; o[2] = g_pos.z; o[3] = g_op; o[4] = g_q.x; o[5] = g_q.y; o[6] = g_q.z; o[7] = g_q.w; o[8] = g_ls.x; o[9] = g_ls.y; o[10] = g_ls.z;

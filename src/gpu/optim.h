@@ -16,6 +16,10 @@ struct OptimParams {
   float noise_weight = 0.f;  // lr_mean * mean_noise_weight (0 disables)
   float noise_clamp = 0.f;   // median_scale
   uint32_t seed = 42, step = 0;
+  // Articulated per-view deformation: the projection Jacobian and the SH view direction are taken at these posed
+  // means (gpu/deform.h) while the update lands on the canonical ones; the gradient is not rotated back.
+  const float4* pos_override = nullptr;
+  float3* g_pos_out = nullptr;   // when set, receives dL/d(mean) per splat (zeros for invisible ones) and the update proceeds
   bool sparse = false;       // skip Adam for splats without gradient
   float* grad_out = nullptr; // debug: write parameter gradients [n][11 + K*3] (pos3, opac, quat4, lscale3, sh) and skip the update
 };

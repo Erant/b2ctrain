@@ -8,6 +8,7 @@ namespace {
 template <int DEG, int FEAT>  // FEAT: 0 none, 1 normals, 2 buffer
 __global__ void project_kernel(int n, const float4* __restrict__ pos_op, const float4* __restrict__ quat, const float4* __restrict__ lscale,
                                ShBuf sb, const float* __restrict__ feat_in, CamDev cam, bool mip,
+                               const float2* __restrict__ warp, int warp_w, int warp_h,
                                int tiles_x, int tiles_y,
                                float4* __restrict__ proj0, float4* __restrict__ proj1, float4* __restrict__ proj2, float2* __restrict__ proj3,
                                uint32_t* __restrict__ tile_count, uint2* __restrict__ hit_info, float* __restrict__ max_screen, int active_deg) {
@@ -16,6 +17,17 @@ __global__ void project_kernel(int n, const float4* __restrict__ pos_op, const f
   float4 po = pos_op[i], q = quat[i], ls = lscale[i];
   ProjIntermediates pr = project_one(po, q, ls, cam, mip);
   if (!pr.ok) { tile_count[i] = 0; return; }
+  if (warp) {
+    // Bilinear sample of the view's displacement grid (cell centres at ((i + 0.5) W / warp_w - 0.5) px).
+    float gx = (pr.mean2d.x + 0.5f) * (float)warp_w / (float)cam.W - 0.5f, gy = (pr.mean2d.y + 0.5f) * (float)warp_h / (float)cam.H - 0.5f;
+    gx = fminf(fmaxf(gx, 0.f), (float)(warp_w - 1)); gy = fminf(fmaxf(gy, 0.f), (float)(warp_h - 1));
+    int x0 = (int)gx, y0 = (int)gy, x1 = min(x0 + 1, warp_w - 1), y1 = min(y0 + 1, warp_h - 1);
+    float fx = gx - x0, fy = gy - y0;
+    float2 a = warp[y0 * warp_w + x0], b = warp[y0 * warp_w + x1], c = warp[y1 * warp_w + x0], d = warp[y1 * warp_w + x1];
+    float2 f = make_float2((a.x * (1.f - fx) + b.x * fx) * (1.f - fy) + (c.x * (1.f - fx) + d.x * fx) * fy,
+                           (a.y * (1.f - fx) + b.y * fx) * (1.f - fy) + (c.y * (1.f - fx) + d.y * fx) * fy);
+    pr.mean2d.x -= f.x; pr.mean2d.y -= f.y;
+  }
   float power = __logf(pr.opac * 255.f);
   TileBox bb = tile_bbox(pr.mean2d.x, pr.mean2d.y, pr.ex, pr.ey, tiles_x, tiles_y);
   uint32_t hits = 0, mask = 0;
@@ -68,13 +80,14 @@ template <int DEG>
 void launch_deg(RenderCtx& ctx, const Model& m, const RenderParams& p, const CamDev& cam, cudaStream_t stream) {
   int blocks = div_up(m.n, PROJ_BLOCK);
   float* ms = m.max_screen.ptr;
+  const float4* pos = p.pos_override ? p.pos_override : m.pos_op.ptr;
   switch (p.feat) {
     case FeatureMode::None:
-      project_kernel<DEG, 0><<<blocks, PROJ_BLOCK, 0, stream>>>(m.n, m.pos_op, m.quat, m.lscale, m.sh(), nullptr, cam, p.mip, ctx.tiles_x, ctx.tiles_y, ctx.proj0, ctx.proj1, ctx.proj2, ctx.proj3, ctx.tile_count, ctx.hit_info, ms, p.sh_degree); break;
+      project_kernel<DEG, 0><<<blocks, PROJ_BLOCK, 0, stream>>>(m.n, pos, m.quat, m.lscale, m.sh(), nullptr, cam, p.mip, p.warp, p.warp_w, p.warp_h, ctx.tiles_x, ctx.tiles_y, ctx.proj0, ctx.proj1, ctx.proj2, ctx.proj3, ctx.tile_count, ctx.hit_info, ms, p.sh_degree); break;
     case FeatureMode::Normals:
-      project_kernel<DEG, 1><<<blocks, PROJ_BLOCK, 0, stream>>>(m.n, m.pos_op, m.quat, m.lscale, m.sh(), nullptr, cam, p.mip, ctx.tiles_x, ctx.tiles_y, ctx.proj0, ctx.proj1, ctx.proj2, ctx.proj3, ctx.tile_count, ctx.hit_info, ms, p.sh_degree); break;
+      project_kernel<DEG, 1><<<blocks, PROJ_BLOCK, 0, stream>>>(m.n, pos, m.quat, m.lscale, m.sh(), nullptr, cam, p.mip, p.warp, p.warp_w, p.warp_h, ctx.tiles_x, ctx.tiles_y, ctx.proj0, ctx.proj1, ctx.proj2, ctx.proj3, ctx.tile_count, ctx.hit_info, ms, p.sh_degree); break;
     case FeatureMode::Buffer:
-      project_kernel<DEG, 2><<<blocks, PROJ_BLOCK, 0, stream>>>(m.n, m.pos_op, m.quat, m.lscale, m.sh(), p.feat_buffer, cam, p.mip, ctx.tiles_x, ctx.tiles_y, ctx.proj0, ctx.proj1, ctx.proj2, ctx.proj3, ctx.tile_count, ctx.hit_info, ms, p.sh_degree); break;
+      project_kernel<DEG, 2><<<blocks, PROJ_BLOCK, 0, stream>>>(m.n, pos, m.quat, m.lscale, m.sh(), p.feat_buffer, cam, p.mip, p.warp, p.warp_w, p.warp_h, ctx.tiles_x, ctx.tiles_y, ctx.proj0, ctx.proj1, ctx.proj2, ctx.proj3, ctx.tile_count, ctx.hit_info, ms, p.sh_degree); break;
   }
   CUDA_KERNEL_CHECK();
 }

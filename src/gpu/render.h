@@ -34,6 +34,15 @@ struct RenderParams {
   const float* feat_buffer = nullptr;  // [n][3] when feat == Buffer
   bool mip = false;
   bool bwd_info = true;         // write per-pixel last index / shrink tile ranges
+  // Render-side alignment (--align-warp render): a per-view displacement field on a warp_w x warp_h grid covering the
+  // image (full-resolution pixel units, the same smoothed and capped flow the frame warp would apply). Each splat's
+  // projected mean is moved by minus the field sampled there, so the render meets the pristine frame where the frame
+  // disagrees with the model, instead of the frame being resampled towards the render. A constant local shift, so
+  // the gradient of the mean is unchanged.
+  const float2* warp = nullptr;
+  int warp_w = 0, warp_h = 0;
+  // Articulated per-view deformation (gpu/deform.h): render from these means instead of the model's canonical ones.
+  const float4* pos_override = nullptr;
   // Hollow loss: per-pixel reference depth of the body surface (camera z, +inf = no surface). A fragment at depth z
   // is penalised by h(z) = clamp((z - z_ref - margin) / margin, 0, 1) times its compositing weight; the gradient of
   // that weight runs through every fragment in front of it, which is what pushes the surface opaque.

@@ -12,6 +12,8 @@ struct ViewGPU {
   bool has_alpha = false, masked = false;
   float alpha_coverage = 1.f;
   float normal_count = 0.f;           // sum of weights where the normal mask is set
+  const float2* warp = nullptr;       // render-side alignment field (see RenderParams::warp) or nullptr
+  int warp_w = 0, warp_h = 0;
 };
 
 struct LossParams {

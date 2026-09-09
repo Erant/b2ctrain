@@ -21,9 +21,14 @@ struct AlignScratch {
   void setup(int W, int H);
 };
 
+constexpr int ALIGN_WARP_DOWN = 4;  // the render-side field is kept at 1/4 resolution (it is a sigma >= 6 px field)
+inline int align_warp_dim(int n) { return (n + ALIGN_WARP_DOWN - 1) / ALIGN_WARP_DOWN; }
+
 // `frame`: packed premultiplied RGBA8 (alpha = subject); `render`: float4 rgb composited on grey 0.5 (ctx.out_rgba).
-// Writes the warped frame (same packing) into `dst`; the flow is smoothed by `sigma` px and capped at `cap` px.
+// The flow is smoothed by `sigma` px and capped at `cap` px. With `dst`, writes the warped frame (same packing) there;
+// with `warp_out`, writes the capped field box-averaged to align_warp_dim(W) x align_warp_dim(H) (full-res px units)
+// for RenderParams::warp. Either may be null.
 AlignStats align_view_gpu(AlignScratch& s, const uint32_t* frame, const float4* render, int W, int H, float sigma, float cap,
-                          uint32_t* dst, cudaStream_t stream);
+                          uint32_t* dst, cudaStream_t stream, float2* warp_out = nullptr);
 
 }  // namespace b2c

@@ -6,6 +6,7 @@
 #include "gpu/optim.h"
 #include "gpu/refine.h"
 #include "gpu/align.h"
+#include "gpu/deform.h"
 #include "gpu/meshdepth.h"
 #include "dataset/mesh.h"
 #include "train/evidence.h"
@@ -68,6 +69,7 @@ struct Phase {
   const std::vector<ViewGPU>* views = nullptr;   // full-resolution views to train on
   bool refine = false, normals = false, res_schedule = false, exports = false, evals = false;
   bool hollow = false;                            // apply the hollow loss (needs a mesh)
+  bool rig_learn_from_start = false;              // refits: the per-view rotations keep learning from their first step
   uint32_t growth_stop = 0;
   std::string label;                              // prefix for the progress line ("" for the main run)
 };
@@ -143,6 +145,31 @@ int train_main(const Config& cfg) {
   const bool hollow_on = cfg.hollow_weight > 0.f && have_mesh;
 
   StageTimer timer; timer.enabled = cfg.bench; timer.init();
+  // Articulated per-view deformation (gpu/deform.h).
+  BodyRig rig; bool have_rig = false;
+  std::vector<int> rig_view(ds.train.size(), -1);
+  DevBuf<float3> mesh_canon; DevBuf<int4> mesh_bj; DevBuf<float4> mesh_bw;
+  if (!cfg.body_rig.empty()) {
+    if (!rig.load(cfg.body_rig)) fail("--body-rig %s: cannot open", cfg.body_rig.c_str());
+    int matched = 0;
+    for (size_t i = 0; i < ds.train.size(); i++) { rig_view[i] = rig.view_index(ds.train[i].name); matched += rig_view[i] >= 0; }
+    if (matched == 0) fail("--body-rig %s: none of its %d views match a training frame name", cfg.body_rig.c_str(), rig.nviews);
+    have_rig = true;
+    rig.bind(model, stream);
+    if (have_mesh && mesh.nv > 0) {
+      // The hollow proxy follows the body: its vertices are bound and posed the same way.
+      mesh_canon.reserve(mesh.nv); CUDA_CHECK(cudaMemcpyAsync(mesh_canon.ptr, mesh.v.ptr, (size_t)mesh.nv * sizeof(float3), cudaMemcpyDeviceToDevice, stream));
+      rig.bind_points(reinterpret_cast<const float*>(mesh_canon.ptr), mesh.nv, 3, mesh_bj, mesh_bw, stream);
+    }
+    CUDA_CHECK(cudaStreamSynchronize(stream));
+    log_info("Body rig %s: %d joints, %d rig vertices, %d/%zu training views matched; splats render at their skinned per-view positions, the model stays canonical", cfg.body_rig.c_str(), rig.nj, rig.nv, matched, ds.train.size());
+  }
+  auto pose_for_view = [&](int vi, RenderParams& rp) {  // vi: training view index
+    if (!have_rig || vi < 0 || rig_view[vi] < 0) return;
+    rig.pose(rig_view[vi], model, stream); rp.pos_override = rig.pos_view;
+    if (have_mesh && mesh.nv > 0) rig.pose_points(rig_view[vi], mesh_canon, mesh_bj, mesh_bw, mesh.nv, mesh.v, stream);
+  };
+
   PinnedBuf<float> h_loss; h_loss.reserve(16);
   double isect_sum = 0; uint32_t isect_max = 0; uint32_t steps_timed = 0;
   const std::vector<ViewGPU>* evidence_views = &gv.views;  // the frames evidence is measured against (warped ones after alignment)
@@ -155,7 +182,7 @@ int train_main(const Config& cfg) {
     bake_min_scale_cpu(c, model, stream);
     if (want_evidence) {
       double te = now_seconds();
-      compute_evidence(ctx, model, *evidence_views, gv.cams, cfg, stream);
+      compute_evidence(ctx, model, *evidence_views, gv.cams, cfg, stream, have_rig ? &rig : nullptr, &rig_view);
       c.has_evidence = true; c.evidence = download_evidence(model, stream);
       log_info("Computed evidence for %zu splats over %zu views in %.1fs", c.n, evidence_views->size(), now_seconds() - te);
       if (cfg.evidence_prune_inmask) {
@@ -203,6 +230,8 @@ int train_main(const Config& cfg) {
 
       RenderParams rp; rp.cam = CameraGPU::from(cam, view.W, view.H);
       for (int k = 0; k < 3; k++) rp.bg[k] = bg[k];
+      rp.warp = view.warp; rp.warp_w = view.warp_w; rp.warp_h = view.warp_h;
+      pose_for_view(vi, rp);
       rp.sh_degree = cfg.sh_warmup_every > 0 ? std::min<int>(model.degree, (int)(step / cfg.sh_warmup_every)) : model.degree;
       rp.feat = normals_active ? FeatureMode::Normals : FeatureMode::None;
       rp.bwd_info = true;
@@ -234,13 +263,24 @@ int train_main(const Config& cfg) {
       if (use_tc) rasterize_backward_tc(ctx, model, rp, lp.grad_scale, stream); else rasterize_backward(ctx, model, rp, stream);
       timer.mark("backward", stream);
 
-      OptimParams op; op.cam = rp.cam; op.active_sh_degree = rp.sh_degree; op.t = ++model.adam_t;
+      OptimParams op; op.cam = rp.cam; op.active_sh_degree = rp.sh_degree; op.t = ++model.adam_t; op.pos_override = rp.pos_override;
+      const bool rig_learn = have_rig && rp.pos_override && (ph.rig_learn_from_start || step >= cfg.body_rig_start_iter);
+      if (rig_learn) op.g_pos_out = rig.g_pos;
       op.lr_mean = (float)(cfg.lr_mean * std::pow(lr_decay, (double)step - 1.0) * median_scale);
       op.lr_rot = cfg.lr_rotation; op.lr_scale = cfg.lr_scale; op.lr_opac = cfg.lr_opac; op.lr_dc = cfg.lr_coeffs_dc; op.lr_sh_rest = cfg.lr_coeffs_dc / cfg.lr_coeffs_sh_scale;
       op.noise_weight = op.lr_mean * cfg.mean_noise_weight; op.noise_clamp = median_scale;
       op.seed = (uint32_t)cfg.seed; op.step = step; op.sparse = cfg.sparse_adam || cfg.recipe == Recipe::Fast;
       optimizer_step(ctx, model, op, stream);
       timer.mark("optim", stream);
+      if (rig_learn) {
+        rig.update(rig_view[vi], model, cfg.body_rig_lr, cfg.body_rig_smooth, cfg.body_rig_zero, cfg.body_rig_global_moment, stream);
+        if (rig.adam_t == 1 || rig.adam_t % 5000 == 0) {
+          rig.sample_torque(stream);
+          auto om = rig.download_omega(stream); double mx = 0, sum = 0; int c = 0;
+          for (int v = 0; v < rig.nviews; v++) for (int j = 0; j < rig.nj; j++) if (rig.active_h[j]) { double a = std::sqrt((double)om[(size_t)v * rig.nj + j].x * om[(size_t)v * rig.nj + j].x + (double)om[(size_t)v * rig.nj + j].y * om[(size_t)v * rig.nj + j].y + (double)om[(size_t)v * rig.nj + j].z * om[(size_t)v * rig.nj + j].z); mx = std::max(mx, a); sum += a; c++; }
+          log_info("Body rig update %d (iter %u): mean |torque| %.3g over active joints; per-view rotations mean %.2f deg, max %.2f deg", rig.adam_t, step, rig.mean_abs_torque, 57.2958 * sum / std::max(c, 1), 57.2958 * mx);
+        }
+      }
 
       // Refine.
       float progress = (float)step / (float)std::max(1u, ph_total);
@@ -252,6 +292,7 @@ int train_main(const Config& cfg) {
         RefineStats rs = refine.run(model, ctx, rpar, stream);
         if (model.cap > (int)ctx.tile_count.count) ctx.setup(ctx.W, ctx.H, model.cap, stream);
         bounds = refine.bounds; median_scale = bounds.median_size();
+        if (have_rig) rig.bind(model, stream);  // new and moved splats take the binding of their nearest rig vertex
         log_info("Refine iter %u, %d splats (pruned %d, split %d, grown %d).", step, model.n, rs.pruned, rs.split_oversized, rs.grown);
         timer.mark("refine", stream);
       }
@@ -311,12 +352,23 @@ int train_main(const Config& cfg) {
   std::vector<ViewGPU> aligned_views;
   DevBuf<uint32_t> warped;
   std::vector<std::thread> debug_writers;
+  DevBuf<float2> warp_fields;
   if (cfg.align_iters > 0) {
-    size_t n_px = 0; int n_align = 0;
-    for (auto& v : gv.views) if (!v.masked) { n_px += (size_t)v.W * v.H; n_align++; }
-    warped.reserve(n_px);
+  if (cfg.align_warp != "frames" && cfg.align_warp != "render") fail("invalid --align-warp '%s' [possible values: frames, render]", cfg.align_warp.c_str());
+  const bool warp_render = cfg.align_warp == "render";
+    size_t n_px = 0, n_grid = 0; int n_align = 0;
+    for (auto& v : gv.views) if (!v.masked) { n_px += (size_t)v.W * v.H; n_grid += (size_t)align_warp_dim(v.W) * align_warp_dim(v.H); n_align++; }
     aligned_views = gv.views;
-    { size_t o = 0; for (auto& v : aligned_views) if (!v.masked) { v.rgba = warped.ptr + o; o += (size_t)v.W * v.H; } }
+    if (warp_render) {
+      // The pristine frames stay the targets; each view gets a displacement grid the projection applies to the splats.
+      warp_fields.reserve(n_grid); warp_fields.zero(stream);
+      size_t o = 0;
+      for (auto& v : aligned_views) if (!v.masked) { v.warp = warp_fields.ptr + o; v.warp_w = align_warp_dim(v.W); v.warp_h = align_warp_dim(v.H); o += (size_t)v.warp_w * v.warp_h; }
+      log_info("Alignment applies the flow to the render (--align-warp render): the pristine frames are never resampled; %zu displacement grids at 1/%d resolution", (size_t)n_align, ALIGN_WARP_DOWN);
+    } else {
+      warped.reserve(n_px);
+      size_t o = 0; for (auto& v : aligned_views) if (!v.masked) { v.rgba = warped.ptr + o; o += (size_t)v.W * v.H; }
+    }
     AlignScratch scratch;
     nlohmann::json history = nlohmann::json::array();
     std::vector<std::string> names; for (auto& v : ds.train) names.push_back(v.name);
@@ -335,15 +387,22 @@ int train_main(const Config& cfg) {
         rp.bg[0] = rp.bg[1] = rp.bg[2] = 0.5f;  // align.py's BACKGROUND: both sides flattened onto the same grey
         rp.sh_degree = model.degree; rp.feat = FeatureMode::None; rp.bwd_info = false;
         if (pv.W != ctx.W || pv.H != ctx.H) ctx.setup(pv.W, pv.H, model.cap, stream);
+        pose_for_view((int)vi, rp);
         render_forward(ctx, model, rp, stream);
-        AlignStats st = align_view_gpu(scratch, pv.rgba, ctx.out_rgba, pv.W, pv.H, sigma, cap, const_cast<uint32_t*>(aligned_views[vi].rgba), stream);
+        // The flow is always measured from the pristine frame to the model's own (undisplaced) render, so the field
+        // never accumulates: a warp of a warp would drift.
+        AlignStats st = warp_render
+            ? align_view_gpu(scratch, pv.rgba, ctx.out_rgba, pv.W, pv.H, sigma, cap, nullptr, stream, const_cast<float2*>(aligned_views[vi].warp))
+            : align_view_gpu(scratch, pv.rgba, ctx.out_rgba, pv.W, pv.H, sigma, cap, const_cast<uint32_t*>(aligned_views[vi].rgba), stream);
         mean_sum += st.mean; p90_sum += st.p90;
         per_view.push_back({{"name", names[vi]}, {"mean", st.mean}, {"p90", st.p90}});
         if (!cfg.align_debug_dir.empty() && (int)vi == sample) {
           // Only the device-to-host copies happen here; encoding and writing run on a thread while the refit trains.
           dbg_w = pv.W; dbg_h = pv.H;
-          dbg_warped.resize((size_t)pv.W * pv.H);
-          CUDA_CHECK(cudaMemcpyAsync(dbg_warped.data(), aligned_views[vi].rgba, dbg_warped.size() * 4, cudaMemcpyDeviceToHost, stream));
+          if (!warp_render) {
+            dbg_warped.resize((size_t)pv.W * pv.H);
+            CUDA_CHECK(cudaMemcpyAsync(dbg_warped.data(), aligned_views[vi].rgba, dbg_warped.size() * 4, cudaMemcpyDeviceToHost, stream));
+          }
           std::vector<float4> rgba = ctx.out_rgba.download((size_t)pv.W * pv.H, stream);
           dbg_render.resize((size_t)pv.W * pv.H * 3);
           for (size_t p = 0; p < rgba.size(); p++) for (int c = 0; c < 3; c++) { float v = c == 0 ? rgba[p].x : (c == 1 ? rgba[p].y : rgba[p].z); dbg_render[p * 3 + c] = (unsigned char)std::min(std::max(v * 255.f + 0.5f, 0.f), 255.f); }
@@ -352,8 +411,8 @@ int train_main(const Config& cfg) {
       }
       const float mean = (float)(mean_sum / std::max(n_align, 1)), p90 = (float)(p90_sum / std::max(n_align, 1));
       means.push_back(mean);
-      log_info("Alignment %u/%u: the training views disagreed with their own renders by %.2f px mean, %.2f px p90 (smoothed at sigma %.1f, capped at %.1f); %d views warped in %.1fs; refitting for %u steps, growth off",
-               it, cfg.align_iters, mean, p90, sigma, cap, n_align, now_seconds() - ta, cfg.align_steps);
+      log_info("Alignment %u/%u: the training views disagreed with their own renders by %.2f px mean, %.2f px p90 (smoothed at sigma %.1f, capped at %.1f); %d views %s in %.1fs; refitting for %u steps, growth off",
+               it, cfg.align_iters, mean, p90, sigma, cap, n_align, warp_render ? "flowed" : "warped", now_seconds() - ta, cfg.align_steps);
       if (p90 >= cap)
         log_warn("Alignment %u/%u is CAP-BOUND: the measured disagreement (p90 %.2f px) is at or past the %.1f px cap, so the warp is limited by the clamp and not by the data", it, cfg.align_iters, p90, cap);
       history.push_back({{"iteration", it}, {"sigma", sigma}, {"cap", cap}, {"align_steps", cfg.align_steps}, {"mean", mean}, {"p90", p90}, {"per_view", per_view}});
@@ -377,6 +436,7 @@ int train_main(const Config& cfg) {
       refit.total = cfg.align_steps; refit.views = &aligned_views; refit.label = format("align %u/%u · ", it, cfg.align_iters);
       refit.hollow = hollow_on;  // a regulariser, not supervision: it stays on through the refits
       double t = train_phase(refit);
+      refit.rig_learn_from_start = true;
       log_info("Alignment %u/%u refit took %s (%.1f it/s)", it, cfg.align_iters, format_duration(t).c_str(), cfg.align_steps / std::max(t, 1e-9));
     }
     std::string traj; for (size_t i = 0; i < means.size(); i++) traj += (i ? " -> " : "") + format("%.2f", means[i]);
@@ -386,6 +446,20 @@ int train_main(const Config& cfg) {
 
   do_export(total, true);
   for (auto& t : debug_writers) t.join();
+  if (have_rig) {
+    auto om = rig.download_omega(stream);
+    nlohmann::json views = nlohmann::json::array();
+    for (int v = 0; v < rig.nviews; v++) {
+      nlohmann::json joints = nlohmann::json::object();
+      for (int j = 0; j < rig.nj; j++) if (rig.active_h[j]) { const float3& w = om[(size_t)v * rig.nj + j]; joints[std::to_string(j)] = {w.x, w.y, w.z}; }
+      views.push_back({{"name", rig.names[v]}, {"omega", joints}});
+    }
+    nlohmann::json payload = {{"updates", rig.adam_t}, {"lr", cfg.body_rig_lr}, {"smooth", cfg.body_rig_smooth}, {"start_iter", cfg.body_rig_start_iter}, {"views", views}};
+    std::string text = payload.dump(1);
+    fs::path out = fs::path(export_dir) / "body_rig_omega.json";
+    FILE* f = fopen(out.string().c_str(), "wb"); if (f) { fwrite(text.data(), 1, text.size(), f); fclose(f); }
+    log_info("Body rig: per-view joint rotations after %d updates written to %s", rig.adam_t, out.string().c_str());
+  }
   if (cfg.bench) {
     log_info("  intersections/step: avg %.0f, max %u", isect_sum / std::max(1u, steps_timed), isect_max);
     double sum = 0; for (auto& [n, ms] : timer.totals) sum += ms;

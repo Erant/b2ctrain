@@ -44,6 +44,7 @@ add_library(b2c_core STATIC
   src/gpu/raster_bwd_tc.cu
   src/gpu/loss.cu
   src/gpu/optim.cu
+  src/gpu/deform.cu
   src/gpu/refine.cu
   src/gpu/images.cu
   src/gpu/align.cu

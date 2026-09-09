@@ -250,6 +250,123 @@ tells the same story: behind-weight at 2 cm against the refit mesh (0.057) is wh
 (0.040 at 5 cm, 0.127 at 2 cm). Wired into b2crunner's workflow 2026-09-09 (refit after stage 2, its mesh into stage 5, docs/body-refit.md there);
 `probe --depth` is what the pipeline's `splat_surface` step calls.
 
+### Render-side alignment warp (2026-09-09)
+
+`--align-warp render` applies the alignment loop's flow to the model instead of to the frames: each view keeps a
+displacement grid (the same sigma-6, 6 px-capped field, box-averaged to 1/4 resolution, `ALIGN_WARP_DOWN`) and the
+projection kernel moves every splat's projected mean by minus the field at its position while the refit trains
+against the PRISTINE frame. The frames are never Lanczos-resampled (b2crunner's alignment guide measured a single
+0.5 px Lanczos resample costing raw Laplacian sharpness 738 -> 480). The field is measured from the pristine frame to
+the model's undisplaced render every iteration, as before, so nothing accumulates; the gradient of the mean is
+unchanged (a locally constant shift), the evidence pass renders with the field. Motivation and the flow decomposition
+by body part that led here (per-bone rigid motion explains 16-39% of the field's energy; the rest is sub-limb
+texture jitter, so a skeletal per-view deformation would duplicate the warp with less capacity) are in the session
+notes of 2026-09-09.
+
+A/B on the 2026-09-09 result bundle's final-stage dataset (81 views 1080x1920), production stage-5 argv (hollow 0.5
+at 3 cm against the refit mesh, 4 alignment iterations of 3000 steps), two seeds each; PSNR against the pristine
+frames every 4th view (`bench/eval_ply.py`); s1 = Laplacian variance after a sigma-1 blur of the grey render, per
+region (regions from the refit mesh's projected skin weights), at the training cameras and at cameras midway between
+them (novel):
+
+| run | PSNR | s1 train head / hands / body | s1 novel head / hands / body | trajectory |
+|---|---|---|---|---|
+| no alignment (`out/refit/hollow_refit_m0.03.ply`) | 35.40 (fits the disagreement) | 23.4 / 40.8 / 27.0 | 22.9 / 38.6 / 25.9 | - |
+| frames (default), seed 42 | 33.23 | 26.6 / 42.5 / 29.7 | 26.2 / 40.1 / 28.6 | 1.22 -> 1.63 |
+| frames, seed 1 | 33.26 | 26.5 / 42.2 / 29.7 | 26.0 / 40.3 / 28.5 | 1.22 -> 1.64 |
+| render, seed 42 | 33.20 | 27.0 / 44.5 / 30.4 | 26.3 / 42.3 / 29.3 | 1.21 -> 1.57 |
+| render, seed 1 | 33.24 | 27.2 / 44.5 / 30.4 | 26.5 / 42.0 / 29.1 | 1.22 -> 1.59 |
+
+Seed-to-seed noise is ~0.2 s1 per region and 0.03 dB. The render-side warp keeps the whole alignment gain and adds
++2% on the body and +5% on the hands at both training and novel cameras, reproducibly; the face gains +0.1 to +0.5
+(at the noise floor); PSNR is 0.03 dB lower in both seeds. Same wall time (the field replaces the Lanczos warp,
+one bilinear fetch per splat per step), 84 MB of grids for 81 views. Novel views gain as much as training views, the
+guide's test for real geometry. A face crop at a novel view is indistinguishable between the two. Not yet the
+default or exposed on b2crunner's step; a `align_warp` param there is a two-line change if it should be.
+Runs in `out/catch/{frames,render}[_s1]/` (not in git).
+
+### Per-view arm rotations: the double limb (2026-09-09, evening)
+
+The delivered splats show a **double limb**: a ghost contour beside the forearms and hands, in the frame-warp and
+render-warp variants alike (crisper in the latter, which fits sharper targets). Measured between ADJACENT pristine
+frames, minus the parallax the static refit mesh predicts for a 4.5-degree step (scratch `limb_motion2.py`, copies in
+`out/catch/`): torso, legs and feet move 2-3 px per pair (the floor), forearms and hands 7-8 px (about 9 mm), and
+the motion is episodic and smooth (lag-1 correlation +0.6): the left forearm swings 20-24 px per view over 3-4
+consecutive views at three places in the orbit (6-9 cm in total each time, verified against the mesh projection).
+The generated video moves the arms by centimetres between orbit segments; a canonical body averages them into two
+copies. Neither 2D warp can fix it (6 px cap, and the flow locks onto whichever copy is nearer; the frame-to-render
+decomposition of the previous section was blind to it for the same reason).
+
+Per-frame SAM-3D-Body fits on all 81 frames were tried first as the source of per-view arm poses and are useless
+for this: they do not see the swings and add ~5 px of noise (a rig built from them made the residual WORSE: forearm
+7.6 -> 9.1 px).
+
+What works: **learn the arm pose per view inside the trainer** (`--body-rig rig.bin`, `src/gpu/deform.*`). The rig
+file carries a subsample of the refit mesh with its MHR skinning, the joint tree and canonical joint positions, and
+the active joints (per arm: shoulder, elbow, wrist, two finger roots). Per view and active joint one axis-angle
+rotation about the joint's (moved) pivot; forward kinematics on the GPU; every splat bound to its nearest rig vertex
+(re-bound after each refine) and rendered at the skinned position; the gradient is the torque of the splats'
+positional gradients about each active ancestor's pivot; Adam per (view, joint) with the second moment shared per
+joint across views (a view in which the arm is hidden behind the body has a tiny torque and takes a small step)
+and a pull towards the two orbit neighbours (`--body-rig-smooth 0.05`); the model and export stay canonical, the
+rotations go to `<export>/body_rig_omega.json`. Learning starts at `--body-rig-start-iter` (the user's suggestion:
+once the splat is roughly in place) and continues through the alignment refits. Cost: none measurable.
+
+Start-iteration sweep, production stage-5 argv (frames warp, hollow 0.5 at 3 cm), `out/catch/rig_s*` (per-parameter
+Adam, no smoothing) and `out/catch/rigv_s*` (shared second moment, smooth 0.05):
+
+| run | rotations mean / max (deg) | adjacent-frame residual, L forearm / L hand (px; static 7.6 / 7.0) | s1 novel hands / body / head (frames: 40.1 / 28.6 / 26.2) | final refit loss (frames -0.19545) | canonical PSNR |
+|---|---|---|---|---|---|
+| rig, start 1k | 6.5 / 37 | 6.6 / 6.1 | 50.3 / 29.0 / 25.8 | -0.19559 | 31.19 |
+| rig, start 5k | 5.9 / 44 | 6.8 / 4.8 | 48.6 / 28.9 / 26.0 | | 31.65 |
+| rig, start 10k | 5.5 / 39 | 6.0 / 4.8 | 46.6 / 29.1 / 26.3 | -0.19559 | 32.06 |
+| rig, start 15k | 5.3 / 35 | 6.2 / 5.6 | 44.4 / 29.1 / 25.8 | -0.19537 | 32.32 |
+| rig shared-v + smooth, start 1k | 1.4 / 3.8 | 7.1 / 7.2 | 50.3 / 29.2 / 25.9 | -0.19564 | 31.32 |
+| rig shared-v + smooth, start 10k | 1.3 / 4.6 | 6.3 / 6.3 | 46.7 / 29.0 / 25.7 | -0.19557 | 32.17 |
+
+- **The double limb is gone at novel views in every rig run** (`out/catch/arm_panel_front_novel33.png`,
+  `arm_panel_back_novel57.png`): the far hand is single with defined fingers, the near forearm has one edge. Hand
+  sharpness rises 10-25%, more with an earlier start; body +1.5%; the face is unchanged (noise 0.2).
+- The training loss, which renders each view with its rotations, is equal or slightly better than the frames run.
+  The canonical model's PSNR against the frames drops 1-2 dB by construction: its arms sit at the mean pose and
+  each frame's arm is elsewhere. That number is not the metric for this problem.
+- Without smoothing the largest rotations (35-44 degrees) sit in the views where that arm is hidden behind the body
+  (left: views 8-14, 43-50, 77-81; right: 25-31, 59-65): per-parameter Adam turns a tiny noisy torque into full
+  steps. Sharing the second moment and pulling towards the neighbours holds every rotation under 5 degrees with the
+  same visual result and the same hand sharpness; the right arm's residual never moves (its swings coincide with its
+  occluded views, where the flow measurement itself is unreliable).
+- Earlier start is better for the hands (50 at 1k vs 47 at 10k vs 44 at 15k) and the crops agree; the concern that
+  the rotations need a settled splat did not materialise, the quarter- and half-resolution phases help the basin.
+
+**How many bones** (same argv, start 1k, shared second moment, smooth 0.05; `out/catch/rigall_*`, `rig_nr*`):
+
+| active joints | s1 novel hands / body / head | adjacent residual head / torso / leg (static 4.0 / 2.5 / 2.0) | final refit loss |
+|---|---|---|---|
+| arms only (12) | 50.3 / 29.2 / 25.9 | - / - / - | -0.19564 |
+| all with >= 30 skinned vertices (110), per-joint Adam | 43.6 / 28.2 / **20.2** | 5.7 / 2.4 / 2.1 | - |
+| all (110), ONE second moment for every joint (`--body-rig-global-moment`) | 21.4 / 16.0 / 6.9 | 12.5 / 7.5 / 5.4 | - |
+| all but the root chain (104: subtree <= half the body) | 49.2 / **30.3** / **28.4** | 3.7 / 2.4 / 2.0 | -0.19590 |
+| all but the root chain + `--body-rig-zero 0.02` | 49.6 / 30.2 / 28.4 | 3.8 / 2.5 / 1.9 | -0.19590 |
+
+- Every bone active with per-joint Adam softens the face (head rotations 1.5 deg mean, fingers 29 deg) and the
+  hands. One global second moment is far worse: the ROOT and SPINE joints carry the largest torques, and a rotation
+  there (0.7 deg mean, 5 max) moves the whole body per view — every region's residual doubled, sharpness collapsed.
+- Excluding joints whose subtree is more than half the body (root, pelvis, spine) and keeping everything else —
+  hips, legs, feet, clavicles, arms, hands, neck, head — is the best configuration measured: hands as the arms-only
+  rig, body +6% and face +9% over the frames baseline (the face was flat with arms only), legs and torso residuals
+  at the floor, the head residual 4.0 -> 3.7, the training loss the best of all runs; visually the face, arms and
+  shoes are cleaner (`out/catch/face_panel_novel33.png`, `body_panel_novel33.png`, `arm_panel_allbones_novel33.png`).
+  With `--body-rig-zero 0.02` the rotations stay at 0.35 deg mean (max 3) for the same result; without it the
+  fingers wander to 30 deg. The recommended setting is therefore: all joints but the root chain, start 1k, shared
+  second moment, smooth 0.05, zero 0.02 (`rig_noroot.bin` from `build_rig2.py` with RIG_ALL=1 RIG_MAX_FRAC=0.5).
+- The canonical model's PSNR against the frames falls further with more bones (33.2 -> 31.3 -> 28.9): more of each
+  frame's per-view pose lives in the rotations; it is still not the metric.
+
+Not in b2crunner yet: the rig builder (`out/catch/build_rig2.py`, needs only the refit outputs: pose joints,
+`rig_binding`, `mesh_world`) should become a step feeding `train_final_splat`, and `--body-rig` a param. Open:
+whether the learned arm trajectory should ALSO drive the frames (re-warping the frames onto the posed render), and
+whether the render-side warp stacks with the rig.
+
 ## What's left
 
 - **Commit the b2crunner side.** Its working tree (`~/Projects/b2crunner`) has uncommitted changes from this work in
