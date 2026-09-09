@@ -124,8 +124,20 @@ int train_main(const Config& cfg) {
   {
     std::string mpath = cfg.mesh;
     if (mpath.empty() && fs::exists(fs::path(ds.root) / "mesh.ply")) mpath = (fs::path(ds.root) / "mesh.ply").string();
-    if (!mpath.empty()) { TriMesh tm = read_mesh(mpath); mesh.upload(tm, stream); have_mesh = true; log_info("Loaded proxy mesh %s: %zu vertices, %zu triangles", mpath.c_str(), tm.nv(), tm.nf()); }
-    if (cfg.hollow_weight > 0.f && !have_mesh) log_warn("--hollow-weight %g given but no proxy mesh (no --mesh and no mesh.ply in the dataset): the hollow loss is OFF", cfg.hollow_weight);
+    if (cfg.hollow_proxy != "auto" && cfg.hollow_proxy != "mesh" && cfg.hollow_proxy != "points") fail("invalid --hollow-proxy '%s' [possible values: auto, mesh, points]", cfg.hollow_proxy.c_str());
+    const bool want_mesh = cfg.hollow_proxy != "points";
+    if (!mpath.empty() && want_mesh) { TriMesh tm = read_mesh(mpath); mesh.upload(tm, stream); have_mesh = true; log_info("Loaded proxy mesh %s: %zu vertices, %zu triangles", mpath.c_str(), tm.nv(), tm.nf()); }
+    // Fallback: the dataset's points as discs. b2crunner's points3D.txt is sampled on the body mesh, so it is the
+    // same surface at ~1 cm resolution; for a generic SfM cloud it is whatever surface the points lie on.
+    if (cfg.hollow_weight > 0.f && !have_mesh && cfg.hollow_proxy != "mesh" && ds.points.size() >= 100) {
+      std::vector<float> xyz(ds.points.size() * 3);
+      for (size_t i = 0; i < ds.points.size(); i++) { xyz[i * 3] = ds.points[i].x; xyz[i * 3 + 1] = ds.points[i].y; xyz[i * 3 + 2] = ds.points[i].z; }
+      float spacing = median_nn_distance(xyz.data(), ds.points.size());
+      float radius = cfg.hollow_points_radius > 0.f ? cfg.hollow_points_radius : 4.f * spacing;
+      mesh.upload_points(xyz.data(), ds.points.size(), radius, stream); have_mesh = true;
+      log_info("Hollow proxy from points: %zu points of points3D.txt as surfels of radius %.4f (median spacing %.4f)%s", ds.points.size(), radius, spacing, mpath.empty() ? " because no mesh was given" : "");
+    }
+    if (cfg.hollow_weight > 0.f && !have_mesh) log_warn("--hollow-weight %g given but no proxy surface (%s): the hollow loss is OFF", cfg.hollow_weight, cfg.hollow_proxy == "mesh" ? "no --mesh and no mesh.ply in the dataset" : "no mesh, and fewer than 100 points to build the points proxy from");
     if (cfg.hollow_weight > 0.f && have_mesh) log_info("Hollow loss on: weight %g, margin %g, dilate %u px, from iteration %u", cfg.hollow_weight, cfg.hollow_margin, cfg.hollow_dilate, cfg.hollow_start_iter);
   }
   const bool hollow_on = cfg.hollow_weight > 0.f && have_mesh;

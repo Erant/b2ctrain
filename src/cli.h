@@ -73,6 +73,8 @@ struct Config {
   float hollow_margin = 0.05f;        // scene units behind the surface where the penalty starts (full at 2x)
   uint32_t hollow_dilate = 2;         // px: reference depth is the farthest surface within this radius
   uint32_t hollow_start_iter = 0;     // first iteration the loss is applied
+  std::string hollow_proxy = "auto"; // auto: mesh if present, else discs on points3D; mesh; points
+  float hollow_points_radius = 0.f;   // surfel radius for the points proxy, 0 = 4x the median point spacing
   int device = 0;
   std::string checkpoint_dir;         // debug dumps
   bool help = false;

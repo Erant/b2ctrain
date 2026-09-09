@@ -29,6 +29,24 @@ Bounds bounds_from_pos(const float* pos, size_t n, float percentile) {
   return b;
 }
 
+float median_nn_distance(const float* pos, size_t n, size_t samples) {
+  if (n < 2) return 0.f;
+  size_t step = std::max<size_t>(1, n / std::max<size_t>(samples, 1));
+  std::vector<float> d;
+  for (size_t p = 0; p < n; p += step) {
+    float px = pos[p * 3], py = pos[p * 3 + 1], pz = pos[p * 3 + 2], best = INFINITY;
+    for (size_t q = 0; q < n; q++) {
+      if (q == p) continue;
+      float dx = pos[q * 3] - px, dy = pos[q * 3 + 1] - py, dz = pos[q * 3 + 2] - pz;
+      best = std::min(best, dx * dx + dy * dy + dz * dz);
+    }
+    if (std::isfinite(best)) d.push_back(std::sqrt(best));
+  }
+  if (d.empty()) return 0.f;
+  std::nth_element(d.begin(), d.begin() + d.size() / 2, d.end());
+  return d[d.size() / 2];
+}
+
 namespace {
 // Scales from the 2nd and 3rd nearest neighbour distances: ln(clamp((d1 + d2) / 4, 1e-3, 0.1 * median_size)).
 std::vector<float> knn_log_scales(const std::vector<float>& pos) {

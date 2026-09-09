@@ -49,7 +49,9 @@ taking the farthest surface within `--hollow-dilate` pixels so silhouettes are f
 the compositing weight that arrives from more than `--hollow-margin` behind that surface (ramping to full penalty at
 twice the margin). The gradient of that weight runs through the fragments in front of it, which is what pushes the
 visible surface opaque; the fragment's own depth is treated as a constant (no pull towards the camera, which would
-drag the far side of the body forward). Costs ~5% of the step. `b2ctrain probe` measures the effect: per pixel,
+drag the far side of the body forward). Costs ~5% of the step. Without a mesh the dataset's `points3D.txt` stands in (`--hollow-proxy points`, or `auto`: surfels
+with PCA normals, radius `--hollow-points-radius` or 4x the median spacing), which for b2crunner's mesh-sampled points
+is the body at ~1 cm resolution. `b2ctrain probe` measures the effect: per pixel,
 the weight arriving from more than `--delta` behind the first surface ("deep") and, with `--mesh`, from behind
 the body ("behind"), as probe.json plus heat maps.
 

@@ -148,6 +148,8 @@ const std::vector<std::pair<const char*, std::vector<Opt>>>& groups() {
       {"hollow-margin", "DIST", "Depth behind the proxy surface (scene units) where the hollow penalty starts; it reaches full strength at twice this [default: 0.05]", F(hollow_margin)},
       {"hollow-dilate", "PX", "The reference depth at a pixel is the farthest mesh depth within this radius (silhouettes and folds are forgiven) [default: 2]", U(hollow_dilate)},
       {"hollow-start-iter", "N", "Apply the hollow loss from this iteration on [default: 0]", U(hollow_start_iter)},
+      {"hollow-proxy", "MODE", "Where the reference surface comes from: `mesh` (a mesh is required), `points` (surfels on the dataset's points3D.txt, normals estimated from the neighbours, which b2crunner samples on the body mesh) or `auto` (the mesh when there is one, else the points) [default: auto]", S(hollow_proxy)},
+      {"hollow-points-radius", "DIST", "Surfel radius of the points proxy in scene units; 0 = four times the median point spacing [default: 0]", F(hollow_points_radius)},
       {"device", "N", "CUDA device index [default: 0]", [](Config& c, const char* v) { c.device = (int)parse_u(v, "device"); }},
       {"checkpoint-dir", "DIR", "Directory for debug dumps", S(checkpoint_dir)},
     }},

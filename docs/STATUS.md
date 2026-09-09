@@ -185,6 +185,32 @@ Off-orbit (elevated ±25°) views move the same way: deep 0.149 -> 0.113, behind
 remaining "deep" weight sits on hair in front of the face and inside the margin band. The delivered splat from the
 run (`ply/scene.ply`, aligned) measured deep 0.135 / behind 0.035, the same as the baseline retrain.
 
+**A/B against the real SAM-3D-Body mesh (2026-09-09, later).** The pipeline's mesh was reproduced locally
+(`~/Projects/sam-3d-body` on the run's anchor front view, `--no-detector`, then a similarity ICP onto the dataset's
+`points3D.txt`: 0.4 cm median / 1.35 cm p90 residual, so it is the pipeline's fitted body to within the margin).
+Every arm probed against that mesh, training views and elevated ±25° views, hollow 0.5 / margin 0.05 throughout:
+
+| reference used in training | deep (train) | behind (train) | deep (elev) | behind (elev) | PSNR |
+|---|---|---|---|---|---|
+| none (baseline) | 0.145 | 0.043 | 0.149 | 0.035 | 35.46 |
+| Poisson proxy of the points | 0.098 | 0.008 | 0.110 | 0.007 | 35.39 |
+| points as surfels (`--hollow-proxy points`, no mesh) | 0.096 | 0.005 | 0.108 | 0.004 | 35.31 |
+| real mesh | 0.102 | 0.004 | 0.114 | 0.004 | 35.36 |
+| real mesh, hands dropped | 0.106 | 0.008 | 0.117 | 0.007 | 35.37 |
+| real mesh, hands dropped, shrunk 1 cm | 0.114 | 0.013 | 0.125 | 0.011 | 35.36 |
+
+All hollow arms are within noise of each other; the reference's exact shape does not matter at a 5 cm margin. The
+mesh's hands are posed differently from the real hands (fingers curled, sticking out below them), yet the hand
+region renders identically across arms at the training view and at +25°, and its error against the frame is equal
+(5.0-5.1 / 255 in the hand box for every arm): the dilation and margin absorb it. Dropping the hands is a harmless
+safety measure, shrinking is not needed. (`out/hollow/hands_cmp.png`, `realmesh_*.ply`, `pointsproxy_*.ply`.)
+
+**Fallback without a mesh** (`--hollow-proxy auto|mesh|points`, `--hollow-points-radius`): the dataset's
+`points3D.txt` is splatted as surfels (PCA normals over 12 neighbours, disc of 4x the median spacing in the tangent
+plane, ray-plane intersection per pixel; camera-facing discs were tried first and sit in front of the surface at
+grazing angles, inflating "behind" 3-6x with the radius). `b2ctrain probe --points <colmap_dir>` measures against the
+same proxy. In the pipeline the points are samples of the body mesh, so the fallback is the mesh at ~1 cm resolution.
+
 b2crunner side (working tree, uncommitted): `render.py` publishes the oriented mesh as `mesh` (`scene.mesh_world` in
 the workflow, the same frame as `points_3d`), `steps/brush.py` writes it as `mesh.ply` beside the COLMAP model and
 passes the flags (`hollow_weight` / `hollow_margin` / `hollow_dilate` params; `tests/test_brush_hollow.py`), the

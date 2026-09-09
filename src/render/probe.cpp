@@ -7,6 +7,8 @@
 #include "gpu/probe.h"
 #include "gpu/meshdepth.h"
 #include "dataset/mesh.h"
+#include "dataset/colmap.h"
+#include "train/init.h"
 #include "ply.h"
 #include "util/log.h"
 #include "stb_image_write.h"
@@ -31,6 +33,8 @@ const char* HELP =
 "      --tau <TAU>              Accumulated alpha that marks the first surface [default: 0.1]\n"
 "      --delta <DIST>           Weight arriving more than this behind the first surface counts as 'deep' (scene units) [default: 0.03]\n"
 "      --mesh <PATH>            Body proxy mesh; adds the 'behind' measure (weight from behind the mesh surface)\n"
+"      --points <COLMAP_DIR>    Instead of (or as well as) a mesh: the model's points3D.txt splatted as discs, as the trainer's fallback does\n"
+"      --points-radius <DIST>   Surfel radius for --points, 0 = four times the median point spacing [default: 0]\n"
 "      --margin <DIST>          Depth behind the mesh surface where 'behind' starts [default: 0.05]\n"
 "      --dilate <PX>            Mesh reference depth is the farthest surface within this radius [default: 2]\n"
 "      --images                 Also write the RGB render of every probed camera\n"
@@ -40,8 +44,8 @@ unsigned char u8(float v) { return (unsigned char)std::lround(std::min(std::max(
 }  // namespace
 
 int probe_main(int argc, char** argv) {
-  std::string splat, cameras, output_dir = "probe", mesh_path;
-  int every = 1, device = 0, dilate = 2; float tau = 0.1f, delta = 0.03f, margin = 0.05f; bool images = false;
+  std::string splat, cameras, output_dir = "probe", mesh_path, points_dir;
+  int every = 1, device = 0, dilate = 2; float tau = 0.1f, delta = 0.03f, margin = 0.05f, points_radius = 0.f; bool images = false;
   for (int i = 2; i < argc; i++) {
     std::string k = argv[i];
     auto val = [&]() -> std::string { if (i + 1 >= argc) fail("a value is required for '%s'", k.c_str()); return argv[++i]; };
@@ -49,6 +53,7 @@ int probe_main(int argc, char** argv) {
     else if (k == "--every") every = std::max(1, atoi(val().c_str())); else if (k == "--tau") tau = strtof(val().c_str(), nullptr);
     else if (k == "--delta") delta = strtof(val().c_str(), nullptr); else if (k == "--mesh") mesh_path = val();
     else if (k == "--margin") margin = strtof(val().c_str(), nullptr); else if (k == "--dilate") dilate = atoi(val().c_str());
+    else if (k == "--points") points_dir = val(); else if (k == "--points-radius") points_radius = strtof(val().c_str(), nullptr);
     else if (k == "--images") images = true; else if (k == "--device") device = atoi(val().c_str());
     else if (k == "-h" || k == "--help") { fputs(HELP, stdout); return 0; }
     else fail("unexpected argument '%s' found", k.c_str());
@@ -66,6 +71,16 @@ int probe_main(int argc, char** argv) {
   RenderCtx ctx; ctx.setup(W, H, model.cap, stream);
   MeshGPU mesh; bool have_mesh = false;
   if (!mesh_path.empty()) { TriMesh tm = read_mesh(mesh_path); mesh.upload(tm, stream); have_mesh = true; log_info("Loaded proxy mesh %s: %zu vertices, %zu triangles", mesh_path.c_str(), tm.nv(), tm.nf()); }
+  if (!points_dir.empty()) {
+    ColmapModel cm = read_colmap_text(points_dir);
+    if (cm.points.size() < 100) fail("--points: only %zu points in %s", cm.points.size(), points_dir.c_str());
+    std::vector<float> xyz(cm.points.size() * 3);
+    for (size_t i = 0; i < cm.points.size(); i++) { xyz[i * 3] = cm.points[i].x; xyz[i * 3 + 1] = cm.points[i].y; xyz[i * 3 + 2] = cm.points[i].z; }
+    float spacing = median_nn_distance(xyz.data(), cm.points.size());
+    float radius = points_radius > 0.f ? points_radius : 4.f * spacing;
+    mesh.upload_points(xyz.data(), cm.points.size(), radius, stream); have_mesh = true;
+    log_info("Points proxy: %zu points as surfels of radius %.4f (median spacing %.4f)", cm.points.size(), radius, spacing);
+  }
   DevBuf<float4> d_out; d_out.reserve((size_t)W * H);
   std::vector<unsigned char> img((size_t)W * H), rgb((size_t)W * H * 4);
   nlohmann::json views = nlohmann::json::array();
@@ -112,6 +127,7 @@ int probe_main(int argc, char** argv) {
     std::string name = c.at("name").get<std::string>(); auto dot = name.rfind('.'); if (dot != std::string::npos) name = name.substr(0, dot);
     nlohmann::json vj = {{"name", name}, {"covered_px", covered}, {"deep_mean", deep_sum / n}, {"deep_frac_gt_0.2", deep_hi / n}, {"interior_px", interior}, {"deep_interior_mean", deep_in / ni}, {"deep_interior_frac_gt_0.2", deep_in_hi / ni}};
     if (have_mesh) { vj["behind_mean"] = behind_sum / n; vj["behind_frac_gt_0.2"] = behind_hi / n; vj["mesh_iou"] = either ? (double)both / (double)either : 0.0; vj["mesh_px"] = mesh_hit; }
+    (void)mesh_path;
     views.push_back(vj);
     sum_deep_in += deep_in / ni; sum_deep_in_frac += deep_in_hi / ni;
     sum_deep += deep_sum / n; sum_deep_frac += deep_hi / n; sum_behind += behind_sum / n; sum_behind_frac += behind_hi / n; sum_cov += either ? (double)both / (double)either : 0.0; nviews++;
