@@ -38,14 +38,44 @@ const char* HELP =
 "      --margin <DIST>          Depth behind the mesh surface where 'behind' starts [default: 0.05]\n"
 "      --dilate <PX>            Mesh reference depth is the farthest surface within this radius [default: 2]\n"
 "      --images                 Also write the RGB render of every probed camera\n"
+"      --depth                  Also write the first-surface depth as <name>.zfirst.png (16-bit, millimetres, 0 = none)\n"
 "      --device <N>             CUDA device [default: 0]\n";
 
 unsigned char u8(float v) { return (unsigned char)std::lround(std::min(std::max(v, 0.f), 1.f) * 255.f); }
+
+uint32_t crc32_of(const unsigned char* d, size_t n, uint32_t c = 0xffffffffu) {
+  for (size_t i = 0; i < n; i++) { c ^= d[i]; for (int k = 0; k < 8; k++) c = (c >> 1) ^ (0xedb88320u & (0u - (c & 1u))); }
+  return c;
+}
+uint32_t adler32_of(const unsigned char* d, size_t n) { uint32_t a = 1, b = 0; for (size_t i = 0; i < n; i++) { a = (a + d[i]) % 65521u; b = (b + a) % 65521u; } return (b << 16) | a; }
+void put32(std::vector<unsigned char>& v, uint32_t x) { v.push_back(x >> 24); v.push_back(x >> 16); v.push_back(x >> 8); v.push_back(x); }
+void chunk(std::vector<unsigned char>& out, const char* type, const std::vector<unsigned char>& data) {
+  put32(out, (uint32_t)data.size());
+  std::vector<unsigned char> td(type, type + 4); td.insert(td.end(), data.begin(), data.end());
+  out.insert(out.end(), td.begin(), td.end());
+  put32(out, crc32_of(td.data(), td.size()) ^ 0xffffffffu);
+}
+// 16-bit greyscale PNG with stored (uncompressed) deflate blocks: stb has no 16-bit writer.
+void write_png16(const std::string& path, int W, int H, const unsigned short* px) {
+  std::vector<unsigned char> raw; raw.reserve((size_t)H * (1 + 2 * W));
+  for (int y = 0; y < H; y++) { raw.push_back(0); for (int x = 0; x < W; x++) { unsigned short v = px[(size_t)y * W + x]; raw.push_back(v >> 8); raw.push_back(v & 0xff); } }
+  std::vector<unsigned char> z = {0x78, 0x01};
+  for (size_t off = 0; off < raw.size();) {
+    size_t n = std::min<size_t>(65535, raw.size() - off); bool last = off + n == raw.size();
+    z.push_back(last ? 1 : 0); z.push_back(n & 0xff); z.push_back(n >> 8); z.push_back(~n & 0xff); z.push_back((~n >> 8) & 0xff);
+    z.insert(z.end(), raw.begin() + off, raw.begin() + off + n); off += n;
+  }
+  put32(z, adler32_of(raw.data(), raw.size()));
+  std::vector<unsigned char> out = {0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a};
+  std::vector<unsigned char> ihdr; put32(ihdr, W); put32(ihdr, H); ihdr.push_back(16); ihdr.push_back(0); ihdr.push_back(0); ihdr.push_back(0); ihdr.push_back(0);
+  chunk(out, "IHDR", ihdr); chunk(out, "IDAT", z); chunk(out, "IEND", {});
+  FILE* f = fopen(path.c_str(), "wb"); if (!f) fail("failed to write '%s'", path.c_str()); fwrite(out.data(), 1, out.size(), f); fclose(f);
+}
 }  // namespace
 
 int probe_main(int argc, char** argv) {
   std::string splat, cameras, output_dir = "probe", mesh_path, points_dir;
-  int every = 1, device = 0, dilate = 2; float tau = 0.1f, delta = 0.03f, margin = 0.05f, points_radius = 0.f; bool images = false;
+  int every = 1, device = 0, dilate = 2; float tau = 0.1f, delta = 0.03f, margin = 0.05f, points_radius = 0.f; bool images = false, depth = false;
   for (int i = 2; i < argc; i++) {
     std::string k = argv[i];
     auto val = [&]() -> std::string { if (i + 1 >= argc) fail("a value is required for '%s'", k.c_str()); return argv[++i]; };
@@ -54,7 +84,7 @@ int probe_main(int argc, char** argv) {
     else if (k == "--delta") delta = strtof(val().c_str(), nullptr); else if (k == "--mesh") mesh_path = val();
     else if (k == "--margin") margin = strtof(val().c_str(), nullptr); else if (k == "--dilate") dilate = atoi(val().c_str());
     else if (k == "--points") points_dir = val(); else if (k == "--points-radius") points_radius = strtof(val().c_str(), nullptr);
-    else if (k == "--images") images = true; else if (k == "--device") device = atoi(val().c_str());
+    else if (k == "--images") images = true; else if (k == "--depth") depth = true; else if (k == "--device") device = atoi(val().c_str());
     else if (k == "-h" || k == "--help") { fputs(HELP, stdout); return 0; }
     else fail("unexpected argument '%s' found", k.c_str());
   }
@@ -139,6 +169,11 @@ int probe_main(int argc, char** argv) {
       stbi_write_png((fs::path(output_dir) / (name + ".behind.png")).string().c_str(), W, H, 1, img.data(), W);
       for (size_t i = 0; i < out.size(); i++) img[i] = std::isfinite(mz[i]) ? (unsigned char)(40 + 215 * (1.f - (mz[i] - zmin) / std::max(zmax - zmin, 1e-6f))) : 0;
       stbi_write_png((fs::path(output_dir) / (name + ".meshz.png")).string().c_str(), W, H, 1, img.data(), W);
+    }
+    if (depth) {
+      std::vector<unsigned short> z16((size_t)W * H);
+      for (size_t i = 0; i < out.size(); i++) { float zf = out[i].y; z16[i] = std::isfinite(zf) ? (unsigned short)std::min(std::max(zf * 1000.f, 0.f), 65535.f) : 0; }
+      write_png16((fs::path(output_dir) / (name + ".zfirst.png")).string(), W, H, z16.data());
     }
     if (images) {
       std::vector<float4> o = ctx.out_rgba.download((size_t)W * H, stream);

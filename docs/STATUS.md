@@ -217,6 +217,39 @@ passes the flags (`hollow_weight` / `hollow_margin` / `hollow_dilate` params; `t
 doctor requires `--hollow-weight`, and both trainings in `fast_helical_native.yaml` set `hollow_weight: 0.5`.
 Splats to look at: `out/hollow/` (baseline, the three settings, the proxy mesh, camera sets).
 
+### Body refit: the hollow loss against a mesh that is where the splat is (2026-09-09, later)
+
+The SAM-3D-Body mesh the pipeline hands the trainer is where the body was *before* two camera refinements and the
+diffusion drift; on the example run the trained splat sits 3 cm higher, 1.3 cm sideways and 3 deg yawed from it,
+with the arms visibly off. b2crunner now has a refit (`pipeline/steps/body_refit.py`, docs/body-refit.md there):
+`splat_surface` runs `b2ctrain probe --depth --tau 0.5` over the training cameras and unprojects the splat's median
+surface into 300k oriented points; `refit_body_to_splat` re-runs the MHR body model with root, pose, scales and shape
+free against a one-sided point-to-plane loss (1 cm clothing allowance, hands excluded, priors to SAM's fit).
+Surface-to-body median 1.33 -> 0.73 cm, points > 5 mm inside the body 24.7% -> 12.9%, 87 s on the 4070 Ti; the
+updated pose parameters replay the refit mesh to 0.001 mm. `out/refit/overlay.png` is the before/after silhouette.
+
+Trained with each mesh (final-stage argv as in the hollow table, no alignment, hollow 0.5, the current
+`--hollow-tau 0.1` default; probe every 8th view, "behind" measured against the refit mesh at the run's own margin):
+
+| mesh | margin | deep | behind | PSNR |
+|---|---|---|---|---|
+| none (baseline) | - | 0.146 | 0.043 | 35.46 |
+| SAM-3D-Body | 0.05 | 0.111 | 0.0016 | 35.40 |
+| refit | 0.05 | 0.119 | 0.0007 | 35.42 |
+| SAM-3D-Body | 0.03 | 0.089 | 0.0060 | 35.37 |
+| refit | 0.03 | 0.094 | 0.0015 | 35.40 |
+| refit | 0.02 | **0.081** | 0.0027 | 35.42 |
+
+With the refit mesh PSNR is equal or a hair higher at every margin, four times less weight ends up behind the body
+at the same margin, and a 2 cm margin becomes usable (the lowest "deep" of any hollow run so far, at no PSNR cost)
+where 3 cm was the risky setting with the SAM mesh. The committed trainer (a267b55, mesh-only reference, what the
+b2crunner image pins) tells the same story with the refit mesh: margin 0.03 deep 0.093 / behind 0.0008 / 35.34 dB,
+margin 0.05 0.111 / 0.0005 / 35.38, against its 0.102 / 0.004 / 35.36 with the SAM mesh at 0.05 (the A/B above).
+b2crunner's final training now takes the refit mesh at margin 0.03. The delivered (no-hollow) splat probed against the two meshes
+tells the same story: behind-weight at 2 cm against the refit mesh (0.057) is what 5 cm gave against the SAM mesh
+(0.040 at 5 cm, 0.127 at 2 cm). Wired into b2crunner's workflow 2026-09-09 (refit after stage 2, its mesh into stage 5, docs/body-refit.md there);
+`probe --depth` is what the pipeline's `splat_surface` step calls.
+
 ## What's left
 
 - **Commit the b2crunner side.** Its working tree (`~/Projects/b2crunner`) has uncommitted changes from this work in
