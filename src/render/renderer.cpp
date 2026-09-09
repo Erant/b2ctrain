@@ -117,6 +117,20 @@ float smoothstep_gate(float lo, float hi, float x) {
 unsigned char to_u8(float v) { return (unsigned char)std::lround(std::min(std::max(v, 0.f), 1.f) * 255.f); }
 }  // namespace
 
+Camera camera_from_json(const nlohmann::json& c, int W, int H) {
+  Camera cam;
+  cam.width = W; cam.height = H;
+  cam.fx = c.at("fx").get<float>(); cam.fy = c.at("fy").get<float>(); cam.cx = c.at("cx").get<float>(); cam.cy = c.at("cy").get<float>();
+  // rotation: OpenGL camera-to-world (columns = local axes, Y up, Z backward). R_cv = R_gl * diag(1,-1,-1).
+  float c2w[9];
+  for (int r = 0; r < 3; r++) for (int col = 0; col < 3; col++) c2w[r * 3 + col] = c.at("rotation")[r][col].get<float>() * (col == 0 ? 1.f : -1.f);
+  float pos[3] = {c.at("position")[0].get<float>(), c.at("position")[1].get<float>(), c.at("position")[2].get<float>()};
+  for (int r = 0; r < 3; r++) for (int col = 0; col < 3; col++) cam.R[r * 3 + col] = c2w[col * 3 + r];
+  for (int r = 0; r < 3; r++) cam.t[r] = -(cam.R[r * 3] * pos[0] + cam.R[r * 3 + 1] * pos[1] + cam.R[r * 3 + 2] * pos[2]);
+  cam.update_pos();
+  return cam;
+}
+
 int render_main(int argc, char** argv) {
   RenderArgs a = parse_render_args(argc, argv);
   CUDA_CHECK(cudaSetDevice(a.device));
@@ -160,16 +174,7 @@ int render_main(int argc, char** argv) {
   double t0 = now_seconds();
   int count = 0;
   for (auto& c : j.at("cameras")) {
-    Camera cam;
-    cam.width = W; cam.height = H;
-    cam.fx = c.at("fx").get<float>(); cam.fy = c.at("fy").get<float>(); cam.cx = c.at("cx").get<float>(); cam.cy = c.at("cy").get<float>();
-    // rotation: OpenGL camera-to-world (columns = local axes, Y up, Z backward). R_cv = R_gl * diag(1,-1,-1).
-    float c2w[9];
-    for (int r = 0; r < 3; r++) for (int col = 0; col < 3; col++) c2w[r * 3 + col] = c.at("rotation")[r][col].get<float>() * (col == 0 ? 1.f : -1.f);
-    float pos[3] = {c.at("position")[0].get<float>(), c.at("position")[1].get<float>(), c.at("position")[2].get<float>()};
-    for (int r = 0; r < 3; r++) for (int col = 0; col < 3; col++) cam.R[r * 3 + col] = c2w[col * 3 + r];
-    for (int r = 0; r < 3; r++) cam.t[r] = -(cam.R[r * 3] * pos[0] + cam.R[r * 3 + 1] * pos[1] + cam.R[r * 3 + 2] * pos[2]);
-    cam.update_pos();
+    Camera cam = camera_from_json(c, W, H);
     RenderParams p; p.cam = CameraGPU::from(cam, W, H);
     const float* bg = gated ? a.cull : a.background;
     p.bg[0] = bg[0]; p.bg[1] = bg[1]; p.bg[2] = bg[2];

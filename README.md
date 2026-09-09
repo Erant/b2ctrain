@@ -39,6 +39,20 @@ baked into the scales at every refine). `--recipe fast` (default) adds sparse Ad
 `--sh-fp16` stores the SH bands above DC as fp16 for ~8% more speed on large models, but its stochastic rounding
 leaves view-dependent colour speckle on specular surfaces at novel views, so it is off by default.
 
+## Hollow loss (false transparency)
+
+A splat that reproduces its training orbit can still be half-transparent: a front surface at partial opacity with
+the far side of the body showing through, which only shows as the view tilts. `--hollow-weight W` adds a geometric
+prior against it, given a body proxy mesh (`--mesh mesh.ply`, or `<dataset>/mesh.ply`; b2crunner writes the
+SAM-3D-Body mesh there). Every step the mesh's depth is rasterised for the current view (`src/gpu/meshdepth.cu`,
+taking the farthest surface within `--hollow-dilate` pixels so silhouettes are forgiven), and each pixel is charged
+the compositing weight that arrives from more than `--hollow-margin` behind that surface (ramping to full penalty at
+twice the margin). The gradient of that weight runs through the fragments in front of it, which is what pushes the
+visible surface opaque; the fragment's own depth is treated as a constant (no pull towards the camera, which would
+drag the far side of the body forward). Costs ~5% of the step. `b2ctrain probe` measures the effect: per pixel,
+the weight arriving from more than `--delta` behind the first surface ("deep") and, with `--mesh`, from behind
+the body ("behind"), as probe.json plus heat maps.
+
 ## Alignment loop
 
 `--align-iters N` runs b2crunner's alignment loop (`pipeline/steps/brush.py`, `pipeline/align.py`) inside the trainer:
@@ -54,7 +68,7 @@ The refit's warm start also holds for `init.ply` runs: a warm start trains at fu
 ## Bench
 
 `bench/eval_ply.py <ply> <colmap_dir>` reports mask-weighted PSNR/SSIM on training views;
-`bench/colmap_to_cameras.py` writes a `cameras.json`; `bench/polish_test.sh` reproduces b2crunner's warm-start invocation.
+`bench/colmap_to_cameras.py` writes a `cameras.json`; `bench/novel_cameras.py` derives off-orbit (elevated / panned) cameras from one; `bench/polish_test.sh` reproduces b2crunner's warm-start invocation.
 `bench/b2crunner_step.py` (run with b2crunner's venv) feeds a dataset through b2crunner's real `brush` step class with
 b2ctrain as the trainer and `docker/brush-splat-render` as the rasteriser, so the cold run, the polish and the alignment
 loop are exercised exactly as the pipeline invokes them.

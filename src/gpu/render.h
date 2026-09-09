@@ -34,6 +34,12 @@ struct RenderParams {
   const float* feat_buffer = nullptr;  // [n][3] when feat == Buffer
   bool mip = false;
   bool bwd_info = true;         // write per-pixel last index / shrink tile ranges
+  // Hollow loss: per-pixel reference depth of the body surface (camera z, +inf = no surface). A fragment at depth z
+  // is penalised by h(z) = clamp((z - z_ref - margin) / margin, 0, 1) times its compositing weight; the gradient of
+  // that weight runs through every fragment in front of it, which is what pushes the surface opaque.
+  const float* hollow_z = nullptr;
+  float hollow_margin = 0.05f;
+  float hollow_lam = 0.f;       // dL/d(penalised weight) per pixel, before grad_scale
 };
 
 // Persistent scratch for rendering one view; grows on demand.
@@ -56,6 +62,7 @@ struct RenderCtx {
   DevBuf<uint2> tile_ranges;
   DevBuf<float4> out_rgba;    // final rgb (with bg) + alpha
   DevBuf<float4> out_feat;    // feat xyz + final transmittance
+  DevBuf<float> hollow_pen;   // per-pixel sum of weight * h(depth) when the hollow loss is on
   DevBuf<uint32_t> last_idx;  // one past the last contributing intersection per pixel
   // backward
   DevBuf<float> v_splat;      // [n][13] per-splat 2D gradients: xy(2) conic(3) rgb(3) opac(1) refine(1) feat(3)

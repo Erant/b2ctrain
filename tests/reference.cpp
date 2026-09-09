@@ -80,6 +80,7 @@ double reference_loss(const SplatCloud& c, const RefParams& p) {
   // Rasterise.
   int W = p.W, H = p.H;
   std::vector<double> img((size_t)W * H * 4, 0.0), feat((size_t)W * H * 3, 0.0);
+  double hollow = 0.0;
   for (int py = 0; py < H; py++) for (int px = 0; px < W; px++) {
     double T = 1, r = 0, g = 0, b = 0, f0 = 0, f1 = 0, f2 = 0;
     double pcx = px + 0.5, pcy = py + 0.5;
@@ -94,6 +95,7 @@ double reference_loss(const SplatCloud& c, const RefParams& p) {
       double vis = alpha * T;
       r += std::max(q.r, 0.0) * vis; g += std::max(q.g, 0.0) * vis; b += std::max(q.b, 0.0) * vis;
       f0 += q.fx * vis; f1 += q.fy * vis; f2 += q.fz * vis;
+      if (p.hollow_z) { double zr = (*p.hollow_z)[(size_t)py * W + px]; double d = (q.depth - zr - p.hollow_margin) / std::max(p.hollow_margin, 1e-4); if (std::isfinite(d)) hollow += vis * std::min(std::max(d, 0.0), 1.0); }
       T = nT;
     }
     size_t o = (size_t)py * W + px;
@@ -136,5 +138,6 @@ double reference_loss(const SplatCloud& c, const RefParams& p) {
     double pl = std::max(std::sqrt(px * px + py * py + pz * pz), 1e-6), gl = std::max(std::sqrt(gx * gx + gy * gy + gz * gz), 1e-6);
     loss += p.normal_scale * wp * (std::abs(px - gx) + std::abs(py - gy) + std::abs(pz - gz) + 1 - (px * gx + py * gy + pz * gz) / (pl * gl));
   }
+  loss += p.hollow_lam * hollow;
   return loss;
 }

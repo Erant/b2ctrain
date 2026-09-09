@@ -9,6 +9,13 @@ constexpr float T_CUTOFF = 1e-4f;
 constexpr float ALPHA_MAX = 0.999f;
 constexpr uint32_t GRAD_LANES = 13;  // xy(2) conic(3) rgb(3) opac(1) refine(1) feat(3)
 
+// Hollow-loss penalty of a fragment at camera depth z against the reference surface depth z_ref: 0 up to `margin`
+// behind the surface, rising linearly to 1 at 2 * margin. z_ref = +inf (no surface) gives 0.
+__device__ __forceinline__ float hollow_h(float z, float z_ref, float margin) {
+  float d = (z - z_ref - margin) / fmaxf(margin, 1e-4f);
+  return isfinite(d) ? fminf(fmaxf(d, 0.f), 1.f) : 0.f;
+}
+
 struct Sym2 { float c00, c01, c11; };
 
 __device__ __forceinline__ float calc_sigma(float px, float py, Sym2 conic, float mx, float my) {

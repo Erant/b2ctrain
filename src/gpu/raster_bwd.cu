@@ -7,13 +7,14 @@ namespace {
 
 // Per-pixel-parallel backward: reverse replay of the forward compositing, per-splat gradients reduced across the
 // tile with warp shuffles into shared accumulators, then one global atomicAdd per lane per splat per tile.
-template <bool FEAT>
+template <bool FEAT, bool HOLLOW>
 __global__ void __launch_bounds__(RT_PX) raster_bwd_kernel(
     const uint2* __restrict__ tile_ranges, const uint32_t* __restrict__ sorted_vals,
     const float4* __restrict__ proj0, const float4* __restrict__ proj1, const float4* __restrict__ proj2, const float2* __restrict__ proj3,
     const float4* __restrict__ out_rgba, const float4* __restrict__ out_feat, const uint32_t* __restrict__ last_idx,
     const float4* __restrict__ v_out, const float4* __restrict__ v_feat_in,
     int W, int H, int tiles_x, float3 bg,
+    const float* __restrict__ hollow_z, float hollow_margin, float hollow_lam,
     float* __restrict__ v_splat, uint32_t* __restrict__ vis_flag) {
   __shared__ float4 s0[RT_PX], s1[RT_PX], s2[RT_PX];
   __shared__ float2 s3[RT_PX];
@@ -43,6 +44,8 @@ __global__ void __launch_bounds__(RT_PX) raster_bwd_kernel(
     v_o_w = (vo.w - (bg.x * vo.x + bg.y * vo.y + bg.z * vo.z)) * T;
   }
   float3 S = make_float3(0, 0, 0), Sf = make_float3(0, 0, 0);
+  float Sh = 0.f, z_ref = INFINITY;
+  if constexpr (HOLLOW) { if (inside) z_ref = hollow_z[pix]; }
   const float inv_final_a = 1.f / fmaxf(final_a, 1e-5f);
   const float Wf = (float)W, Hf = (float)H;
 
@@ -89,6 +92,8 @@ __global__ void __launch_bounds__(RT_PX) raster_bwd_kernel(
             g[10] = vis * vf.x; g[11] = vis * vf.y; g[12] = vis * vf.z;
             v_alpha += (T_before * fx - Sf.x * ra) * vf.x + (T_before * fy - Sf.y * ra) * vf.y + (T_before * fz - Sf.z * ra) * vf.z;
           }
+          float hh = 0.f, v_sigma_photo = -alpha * v_alpha;  // the growth statistic (g[9]) is photometric only
+          if constexpr (HOLLOW) { hh = hollow_h(c.z, z_ref, hollow_margin); v_alpha += hollow_lam * (T_before * hh - Sh * ra); }
           float v_sigma = -alpha * v_alpha;
           // Note dx here is pixel - mean; brush uses mean - pixel with the same formulas, sign cancels in dx*dx
           // but not in the xy gradient: d sigma / d mean = -(conic * d) with d = pixel - mean.
@@ -98,11 +103,13 @@ __global__ void __launch_bounds__(RT_PX) raster_bwd_kernel(
             g[2] = 0.5f * v_sigma * dx * dx; g[3] = v_sigma * dx * dy; g[4] = 0.5f * v_sigma * dy * dy;
             g[0] = vxy_x; g[1] = vxy_y;
             g[8] = v_alpha * gauss;
-            float len = sqrtf(vxy_x * Wf * vxy_x * Wf + vxy_y * Hf * vxy_y * Hf);
+            float px_x = -v_sigma_photo * (a.z * dx + a.w * dy), px_y = -v_sigma_photo * (a.w * dx + c.x * dy);
+            float len = sqrtf(px_x * Wf * px_x * Wf + px_y * Hf * px_y * Hf);
             g[9] = len * inv_final_a;
           }
           S.x += cr * vis; S.y += cg * vis; S.z += cb * vis;
           if constexpr (FEAT) { Sf.x += fx * vis; Sf.y += fy * vis; Sf.z += fz * vis; }
+          if constexpr (HOLLOW) Sh += hh * vis;
           T = T_before;
         }
       }
@@ -136,10 +143,11 @@ __global__ void __launch_bounds__(RT_PX) raster_bwd_kernel(
 void rasterize_backward(RenderCtx& ctx, const Model& m, const RenderParams& p, cudaStream_t stream) {
   float3 bg = make_float3(p.bg[0], p.bg[1], p.bg[2]);
   dim3 grid(ctx.n_tiles), block(RT_PX);
-  if (p.feat != FeatureMode::None)
-    raster_bwd_kernel<true><<<grid, block, 0, stream>>>(ctx.tile_ranges, ctx.vals_sorted, ctx.proj0, ctx.proj1, ctx.proj2, ctx.proj3, ctx.out_rgba, ctx.out_feat, ctx.last_idx, ctx.v_out, ctx.v_feat, ctx.W, ctx.H, ctx.tiles_x, bg, ctx.v_splat, ctx.vis_flag);
-  else
-    raster_bwd_kernel<false><<<grid, block, 0, stream>>>(ctx.tile_ranges, ctx.vals_sorted, ctx.proj0, ctx.proj1, ctx.proj2, ctx.proj3, ctx.out_rgba, ctx.out_feat, ctx.last_idx, ctx.v_out, ctx.v_feat, ctx.W, ctx.H, ctx.tiles_x, bg, ctx.v_splat, ctx.vis_flag);
+  const bool feat = p.feat != FeatureMode::None, hollow = p.hollow_z != nullptr && p.hollow_lam != 0.f;
+#define L(F, HO) raster_bwd_kernel<F, HO><<<grid, block, 0, stream>>>(ctx.tile_ranges, ctx.vals_sorted, ctx.proj0, ctx.proj1, ctx.proj2, ctx.proj3, ctx.out_rgba, ctx.out_feat, ctx.last_idx, ctx.v_out, ctx.v_feat, ctx.W, ctx.H, ctx.tiles_x, bg, p.hollow_z, p.hollow_margin, p.hollow_lam, ctx.v_splat, ctx.vis_flag)
+  if (feat) { if (hollow) L(true, true); else L(true, false); }
+  else { if (hollow) L(false, true); else L(false, false); }
+#undef L
   CUDA_KERNEL_CHECK();
 }
 

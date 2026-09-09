@@ -6,6 +6,8 @@
 #include "gpu/optim.h"
 #include "gpu/refine.h"
 #include "gpu/align.h"
+#include "gpu/meshdepth.h"
+#include "dataset/mesh.h"
 #include "train/evidence.h"
 #include "train/gpu_views.h"
 #include "util/log.h"
@@ -65,6 +67,7 @@ struct Phase {
   uint32_t total = 0, start = 0;
   const std::vector<ViewGPU>* views = nullptr;   // full-resolution views to train on
   bool refine = false, normals = false, res_schedule = false, exports = false, evals = false;
+  bool hollow = false;                            // apply the hollow loss (needs a mesh)
   uint32_t growth_stop = 0;
   std::string label;                              // prefix for the progress line ("" for the main run)
 };
@@ -115,6 +118,17 @@ int train_main(const Config& cfg) {
   for (auto& c : gv.cams) { cam_pos.insert(cam_pos.end(), {c.pos[0], c.pos[1], c.pos[2]}); cam_focal.push_back(c.focal_px()); }
   refine.set_cameras(cam_pos, cam_focal);
   refine.update_min_scale(model, stream);  // brush attaches the floor only at refine; attach it at start too for consistency
+
+  // Body proxy mesh for the hollow loss.
+  MeshGPU mesh; bool have_mesh = false;
+  {
+    std::string mpath = cfg.mesh;
+    if (mpath.empty() && fs::exists(fs::path(ds.root) / "mesh.ply")) mpath = (fs::path(ds.root) / "mesh.ply").string();
+    if (!mpath.empty()) { TriMesh tm = read_mesh(mpath); mesh.upload(tm, stream); have_mesh = true; log_info("Loaded proxy mesh %s: %zu vertices, %zu triangles", mpath.c_str(), tm.nv(), tm.nf()); }
+    if (cfg.hollow_weight > 0.f && !have_mesh) log_warn("--hollow-weight %g given but no proxy mesh (no --mesh and no mesh.ply in the dataset): the hollow loss is OFF", cfg.hollow_weight);
+    if (cfg.hollow_weight > 0.f && have_mesh) log_info("Hollow loss on: weight %g, margin %g, dilate %u px, from iteration %u", cfg.hollow_weight, cfg.hollow_margin, cfg.hollow_dilate, cfg.hollow_start_iter);
+  }
+  const bool hollow_on = cfg.hollow_weight > 0.f && have_mesh;
 
   StageTimer timer; timer.enabled = cfg.bench; timer.init();
   PinnedBuf<float> h_loss; h_loss.reserve(16);
@@ -181,6 +195,11 @@ int train_main(const Config& cfg) {
       rp.feat = normals_active ? FeatureMode::Normals : FeatureMode::None;
       rp.bwd_info = true;
       if (view.W != ctx.W || view.H != ctx.H) ctx.setup(view.W, view.H, model.cap, stream);
+      const bool hollow_active = ph.hollow && step >= std::max(cfg.hollow_start_iter, 1u);
+      if (hollow_active) {
+        mesh.rasterize(rp.cam, view.W, view.H, (int)cfg.hollow_dilate, stream);
+        rp.hollow_z = mesh.depth; rp.hollow_margin = cfg.hollow_margin; rp.hollow_lam = cfg.hollow_weight / ((float)view.W * (float)view.H);
+      }
       render_forward(ctx, model, rp, stream);
       isect_sum += ctx.num_isect; isect_max = std::max(isect_max, ctx.num_isect); steps_timed++;
       timer.mark("forward", stream);
@@ -197,6 +216,7 @@ int train_main(const Config& cfg) {
       lp.grad_scale = use_tc ? 3.f * (float)view.W * (float)view.H : 1.f;
       photometric_loss(ctx, view, lp, stream);
       if (normals_active) { lp.normal_scale = cfg.normal_loss_weight * (float)cfg.normal_loss_every / std::max(view.normal_count, 1.f); normal_loss(ctx, view, lp, stream); }
+      if (hollow_active) hollow_loss(ctx, rp.hollow_lam, stream);
       accumulate_loss(ctx, stream);
       timer.mark("loss", stream);
       if (use_tc) rasterize_backward_tc(ctx, model, rp, lp.grad_scale, stream); else rasterize_backward(ctx, model, rp, stream);
@@ -268,6 +288,7 @@ int train_main(const Config& cfg) {
     Phase main;
     main.total = total; main.start = cfg.start_iter; main.views = &gv.views;
     main.refine = true; main.normals = true; main.res_schedule = res_schedule; main.exports = true; main.evals = true; main.growth_stop = growth_stop;
+    main.hollow = hollow_on;
     double train_time = train_phase(main);
     log_info("Training took %s (%.1f it/s)", format_duration(train_time).c_str(), (total - cfg.start_iter) / std::max(train_time, 1e-9));
   }
@@ -342,6 +363,7 @@ int train_main(const Config& cfg) {
       refine.update_bounds(model, stream); bounds = refine.bounds; median_scale = bounds.median_size();
       Phase refit;
       refit.total = cfg.align_steps; refit.views = &aligned_views; refit.label = format("align %u/%u · ", it, cfg.align_iters);
+      refit.hollow = hollow_on;  // a regulariser, not supervision: it stays on through the refits
       double t = train_phase(refit);
       log_info("Alignment %u/%u refit took %s (%.1f it/s)", it, cfg.align_iters, format_duration(t).c_str(), cfg.align_steps / std::max(t, 1e-9));
     }

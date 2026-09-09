@@ -20,6 +20,7 @@ struct Scene {
   Camera cam;
   std::vector<uint32_t> gt, gtn;
   std::vector<uint8_t> wts;
+  std::vector<float> hollow_z;  // per-pixel reference surface depth for the hollow loss (inf = none)
 };
 
 static Scene make_scene(uint64_t seed, int n) {
@@ -46,14 +47,17 @@ static Scene make_scene(uint64_t seed, int n) {
     s.gtn[i] = nr | (ng << 8) | (nb << 16) | (na << 24);
     s.wts[i] = (uint8_t)(64 + u(rng) * 191);
   }
+  s.hollow_z.resize(s.W * s.H);
+  for (int y = 0; y < s.H; y++) for (int x = 0; x < s.W; x++) s.hollow_z[y * s.W + x] = (x < 6 && y < 6) ? INFINITY : 1.9f + 0.25f * std::sin(x * 0.4f) + 0.2f * std::cos(y * 0.3f);
   return s;
 }
 
 struct Harness {
-  Model model; RenderCtx ctx; DevBuf<uint32_t> gt, gtn; DevBuf<uint8_t> wts; ViewGPU view; LossParams lp; RenderParams rp; Scene* sc;
+  Model model; RenderCtx ctx; DevBuf<uint32_t> gt, gtn; DevBuf<uint8_t> wts; DevBuf<float> hz; ViewGPU view; LossParams lp; RenderParams rp; Scene* sc;
   PinnedBuf<float> h; DevBuf<float> grads;
-  void setup(Scene& s, bool masked, bool normals) {
-    sc = &s;
+  bool hollow = false;
+  void setup(Scene& s, bool masked, bool normals, bool with_hollow = false) {
+    sc = &s; hollow = with_hollow;
     model.upload(s.cloud);
     ctx.setup(s.W, s.H, model.cap, 0);
     gt.upload(s.gt); gtn.upload(s.gtn); wts.upload(s.wts);
@@ -63,6 +67,7 @@ struct Harness {
     lp.normal_scale = normals ? 0.05f / 100.f : 0.f;
     rp.cam = CameraGPU::from(s.cam, s.W, s.H); for (int k = 0; k < 3; k++) rp.bg[k] = lp.bg[k];
     rp.sh_degree = s.degree; rp.feat = normals ? FeatureMode::Normals : FeatureMode::None; rp.bwd_info = true;
+    if (hollow) { hz.upload(s.hollow_z); rp.hollow_z = hz; rp.hollow_margin = 0.05f; rp.hollow_lam = 0.7f / (float)(s.W * s.H); }
     h.reserve(16);
   }
   double loss() {
@@ -70,6 +75,7 @@ struct Harness {
     ctx.loss_accum.zero(0, 4);
     photometric_loss(ctx, view, lp, 0);
     if (lp.normal_scale > 0) normal_loss(ctx, view, lp, 0);
+    if (hollow) hollow_loss(ctx, rp.hollow_lam, 0);
     CUDA_CHECK(cudaMemcpy(h.ptr, ctx.loss_accum.ptr, 4 * sizeof(float), cudaMemcpyDeviceToHost));
     return (double)h.ptr[0] + (double)h.ptr[1];
   }
@@ -156,15 +162,16 @@ int main(int argc, char** argv) {
   int align_fails = test_align();
   if (argc > 1) g_eps = (float)atof(argv[1]);
   int fails = 0, total = 0, skipped = 0;
-  for (int cfg = 0; cfg < 6; cfg++) {
-    bool masked = cfg % 3 == 1, normals = cfg % 3 == 2, tc = cfg >= 3;
+  for (int cfg = 0; cfg < 9; cfg++) {
+    bool masked = cfg % 3 == 1, normals = cfg % 3 == 2, tc = cfg >= 3, hollow = cfg >= 6;
     Scene s = make_scene(1234 + cfg % 3, 24);
-    Harness hs; hs.setup(s, masked, normals); hs.tc = tc;
+    Harness hs; hs.setup(s, masked, normals, hollow); hs.tc = tc;
     std::vector<float> an = hs.analytic();
     RefParams rp; rp.W = s.W; rp.H = s.H; rp.cam = s.cam; for (int k = 0; k < 3; k++) rp.bg[k] = hs.lp.bg[k];
     rp.composite = hs.lp.composite; rp.mask = hs.lp.mask; rp.alpha_lane = hs.lp.alpha_lane; rp.normals = normals;
     rp.l1_w = hs.lp.l1_w; rp.ssim_w = hs.lp.ssim_w; rp.match_alpha_weight = hs.lp.match_alpha_weight; rp.scale = hs.lp.scale; rp.normal_scale = hs.lp.normal_scale;
     rp.gt = &s.gt; rp.gtn = &s.gtn; rp.wts = &s.wts;
+    if (hollow) { rp.hollow_z = &s.hollow_z; rp.hollow_lam = hs.rp.hollow_lam; rp.hollow_margin = hs.rp.hollow_margin; }
     double gpu_loss = hs.loss(), ref_loss = reference_loss(s.cloud, rp);
     printf("cfg %d: gpu loss %.7f reference loss %.7f (rel diff %.2e)\n", cfg, gpu_loss, ref_loss, std::abs(gpu_loss - ref_loss) / std::abs(ref_loss));
     int K = s.cloud.K(); size_t per = 11 + K * 3;
@@ -173,6 +180,10 @@ int main(int argc, char** argv) {
     for (int i = 0; i < s.cloud.n; i += 2) {
       for (size_t p = 0; p < per; p++) {
         if (p >= 11 && (p - 11) % 5 != 0) continue;  // sample SH lanes
+        // The hollow loss treats a fragment's depth as a constant: its gradient runs through the compositing weights
+        // only (pulling a penalised splat towards the camera would drag the far side of the body forward through it),
+        // so the finite difference along the means, which moves the depth, is not what the kernel computes.
+        if (hollow && p < 3) continue;
         float* ref = nullptr;
         if (p < 3) ref = &s.cloud.pos[i * 3 + p];
         else if (p == 3) ref = &s.cloud.opacity[i];
@@ -193,7 +204,7 @@ int main(int argc, char** argv) {
         max_rel = std::max(max_rel, rel);
       }
     }
-    printf("cfg %d (%s%s%s): checked %d params, max rel err %.4f\n", cfg, masked ? "masked" : "transparent", normals ? "+normals" : "", tc ? " tc" : " warp", checked, max_rel);
+    printf("cfg %d (%s%s%s%s): checked %d params, max rel err %.4f\n", cfg, masked ? "masked" : "transparent", normals ? "+normals" : "", tc ? " tc" : " warp", hollow ? " +hollow" : "", checked, max_rel);
   }
   printf("%d / %d mismatches (%d non-smooth points skipped)\n", fails, total, skipped);
   if (align_fails) printf("%d alignment test failure(s)\n", align_fails);

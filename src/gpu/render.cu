@@ -14,7 +14,7 @@ void RenderCtx::setup(int w, int h, int n, cudaStream_t stream) {
   if (vis_flag.count < nn) { vis_flag.reserve(nn); vis_flag.zero(stream); }
   tile_ranges.reserve(n_tiles);
   size_t npx = (size_t)W * H;
-  out_rgba.reserve(npx); out_feat.reserve(npx); last_idx.reserve(npx); v_out.reserve(npx); v_feat.reserve(npx);
+  out_rgba.reserve(npx); out_feat.reserve(npx); hollow_pen.reserve(npx); last_idx.reserve(npx); v_out.reserve(npx); v_feat.reserve(npx);
   loss_accum.reserve(16);
   h_count.reserve(4);
   if (isect_cap == 0) { isect_cap = 1u << 22; keys.reserve(isect_cap); vals.reserve(isect_cap); keys_sorted.reserve(isect_cap); vals_sorted.reserve(isect_cap); }

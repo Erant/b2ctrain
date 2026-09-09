@@ -33,6 +33,7 @@ add_library(b2c_core STATIC
   src/cli.cpp
   src/dataset/colmap.cpp
   src/dataset/views.cpp
+  src/dataset/mesh.cpp
   src/ply.cpp
   src/model.cu
   src/gpu/render.cu
@@ -46,11 +47,14 @@ add_library(b2c_core STATIC
   src/gpu/refine.cu
   src/gpu/images.cu
   src/gpu/align.cu
+  src/gpu/meshdepth.cu
+  src/gpu/probe.cu
   src/train/trainer.cpp
   src/train/init.cpp
   src/train/evidence.cu
   src/render/renderer.cpp
   src/render/confidence.cu
+  src/render/probe.cpp
 )
 target_include_directories(b2c_core PUBLIC src third_party ${CUDAToolkit_INCLUDE_DIRS})
 target_link_libraries(b2c_core PUBLIC Threads::Threads)

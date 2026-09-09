@@ -26,13 +26,14 @@ struct SmemLayout {
   static constexpr size_t total = A + B + C + S0 + S3 + G;
 };
 
-template <bool FEAT>
+template <bool FEAT, bool HOLLOW>
 __global__ void __launch_bounds__(RT_PX) raster_bwd_tc_kernel(
     const uint2* __restrict__ tile_ranges, const uint32_t* __restrict__ sorted_vals,
     const float4* __restrict__ proj0, const float4* __restrict__ proj1, const float4* __restrict__ proj2, const float2* __restrict__ proj3,
     const float4* __restrict__ out_rgba, const float4* __restrict__ out_feat, const uint32_t* __restrict__ last_idx,
     const float4* __restrict__ v_out, const float4* __restrict__ v_feat_in,
     int W, int H, int tiles_x, float3 bg, float inv_gscale,
+    const float* __restrict__ hollow_z, float hollow_margin, float hollow_lam,
     float* __restrict__ v_splat, uint32_t* __restrict__ vis_flag) {
   extern __shared__ __align__(128) unsigned char smem[];
   __half* A = (__half*)smem;                                   // [NTYPES][GROUP][RT_PX]
@@ -74,6 +75,8 @@ __global__ void __launch_bounds__(RT_PX) raster_bwd_tc_kernel(
     b[12] = __float2half(1.f); b[13] = __float2half(0.f); b[14] = __float2half(0.f); b[15] = __float2half(0.f);
   }
   float3 S = make_float3(0, 0, 0), Sf = make_float3(0, 0, 0);
+  float Sh = 0.f, z_ref = INFINITY;
+  if constexpr (HOLLOW) { if (inside) z_ref = hollow_z[pix]; }
   const float inv_final_a = 1.f / fmaxf(final_a, 1e-5f);
   const float Wf = (float)W, Hf = (float)H;
 
@@ -123,14 +126,17 @@ __global__ void __launch_bounds__(RT_PX) raster_bwd_tc_kernel(
                 float2 f2 = s3[sj]; fx = col.w; fy = f2.x; fz = f2.y;
                 v_alpha += (T_before * fx - Sf.x * ra) * vf.x + (T_before * fy - Sf.y * ra) * vf.y + (T_before * fz - Sf.z * ra) * vf.z;
               }
+              float hh = 0.f, v_sigma_photo = -alpha * v_alpha;  // the growth statistic below is photometric only
+              if constexpr (HOLLOW) { hh = hollow_h(c.z, z_ref, hollow_margin); v_alpha += hollow_lam * (T_before * hh - Sh * ra); }
               float v_sigma = -alpha * v_alpha;
               if (c.y * gauss <= ALPHA_MAX) {
                 s_va = v_alpha * gauss; s_vs = v_sigma;
-                float vxy_x = -v_sigma * (a.z * dx + a.w * dy), vxy_y = -v_sigma * (a.w * dx + c.x * dy);
+                float vxy_x = -v_sigma_photo * (a.z * dx + a.w * dy), vxy_y = -v_sigma_photo * (a.w * dx + c.x * dy);
                 s_r = sqrtf(vxy_x * Wf * vxy_x * Wf + vxy_y * Hf * vxy_y * Hf) * inv_final_a * R_SCALE;
               }
               S.x += cr * vis; S.y += cg * vis; S.z += cb * vis;
               if constexpr (FEAT) { Sf.x += fx * vis; Sf.y += fy * vis; Sf.z += fz * vis; }
+              if constexpr (HOLLOW) Sh += hh * vis;
               T = T_before;
               auto h = [](float x) { x = isfinite(x) ? fminf(fmaxf(x, -60000.f), 60000.f) : 0.f; return __float2half(x); };
               __half* row = A + (size_t)j * RT_PX + threadIdx.x;
@@ -196,7 +202,7 @@ __global__ void __launch_bounds__(RT_PX) raster_bwd_tc_kernel(
   }
 }
 
-bool g_attr_set[2] = {false, false};
+bool g_attr_set[4] = {false, false, false, false};
 
 }  // namespace
 
@@ -205,13 +211,15 @@ void rasterize_backward_tc(RenderCtx& ctx, const Model& m, const RenderParams& p
   dim3 grid(ctx.n_tiles), block(RT_PX);
   size_t smem = SmemLayout::total;
   float inv = 1.f / grad_scale;
-  if (p.feat != FeatureMode::None) {
-    if (!g_attr_set[1]) { CUDA_CHECK(cudaFuncSetAttribute(raster_bwd_tc_kernel<true>, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem)); g_attr_set[1] = true; }
-    raster_bwd_tc_kernel<true><<<grid, block, smem, stream>>>(ctx.tile_ranges, ctx.vals_sorted, ctx.proj0, ctx.proj1, ctx.proj2, ctx.proj3, ctx.out_rgba, ctx.out_feat, ctx.last_idx, ctx.v_out, ctx.v_feat, ctx.W, ctx.H, ctx.tiles_x, bg, inv, ctx.v_splat, ctx.vis_flag);
-  } else {
-    if (!g_attr_set[0]) { CUDA_CHECK(cudaFuncSetAttribute(raster_bwd_tc_kernel<false>, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem)); g_attr_set[0] = true; }
-    raster_bwd_tc_kernel<false><<<grid, block, smem, stream>>>(ctx.tile_ranges, ctx.vals_sorted, ctx.proj0, ctx.proj1, ctx.proj2, ctx.proj3, ctx.out_rgba, ctx.out_feat, ctx.last_idx, ctx.v_out, ctx.v_feat, ctx.W, ctx.H, ctx.tiles_x, bg, inv, ctx.v_splat, ctx.vis_flag);
-  }
+  const bool feat = p.feat != FeatureMode::None, hollow = p.hollow_z != nullptr && p.hollow_lam != 0.f;
+  const float lam = p.hollow_lam * grad_scale;
+#define L(F, HO, slot) do { \
+    if (!g_attr_set[slot]) { CUDA_CHECK(cudaFuncSetAttribute(raster_bwd_tc_kernel<F, HO>, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem)); g_attr_set[slot] = true; } \
+    raster_bwd_tc_kernel<F, HO><<<grid, block, smem, stream>>>(ctx.tile_ranges, ctx.vals_sorted, ctx.proj0, ctx.proj1, ctx.proj2, ctx.proj3, ctx.out_rgba, ctx.out_feat, ctx.last_idx, ctx.v_out, ctx.v_feat, ctx.W, ctx.H, ctx.tiles_x, bg, inv, p.hollow_z, p.hollow_margin, lam, ctx.v_splat, ctx.vis_flag); \
+  } while (0)
+  if (feat) { if (hollow) L(true, true, 3); else L(true, false, 1); }
+  else { if (hollow) L(false, true, 2); else L(false, false, 0); }
+#undef L
   CUDA_KERNEL_CHECK();
 }
 

@@ -32,6 +32,8 @@ void photometric_loss(RenderCtx& ctx, const ViewGPU& view, const LossParams& lp,
 void normal_loss(RenderCtx& ctx, const ViewGPU& view, const LossParams& lp, cudaStream_t stream);
 // Adds loss_accum[0]+[1] into the running sum loss_accum[2] and increments loss_accum[3].
 void accumulate_loss(RenderCtx& ctx, cudaStream_t stream);
+// Adds lam * sum(ctx.hollow_pen) (the hollow loss value; the gradient is taken in the rasteriser backward) to ctx.loss_accum[0].
+void hollow_loss(RenderCtx& ctx, float lam, cudaStream_t stream);
 // Eval metrics on the current render: writes [mse_sum, ssim_sum, count] into ctx.loss_accum[4..7].
 void eval_metrics(RenderCtx& ctx, const ViewGPU& view, bool mask_weighted, cudaStream_t stream);
 

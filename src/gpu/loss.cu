@@ -194,6 +194,16 @@ __global__ void __launch_bounds__(TILE_PX) photometric_kernel(
   }
 }
 
+__global__ void hollow_reduce_kernel(int npix, const float* __restrict__ pen, float lam, float* __restrict__ loss_accum) {
+  __shared__ float s_red[8];
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  float v = i < npix ? pen[i] : 0.f;
+  v = warp_sum(v);
+  if ((threadIdx.x & 31) == 0) s_red[threadIdx.x >> 5] = v;
+  __syncthreads();
+  if (threadIdx.x == 0) { float t = 0.f; for (int k = 0; k < 8; k++) t += s_red[k]; if (t != 0.f) atomicAdd(loss_accum, t * lam); }
+}
+
 __global__ void normal_loss_kernel(int npix, const float4* __restrict__ feat, const uint32_t* __restrict__ gtn, const uint8_t* __restrict__ weights,
                                    float scale, float grad_scale, float4* __restrict__ v_feat, float* __restrict__ loss_accum) {
   int pix = blockIdx.x * blockDim.x + threadIdx.x;
@@ -305,6 +315,12 @@ void photometric_loss(RenderCtx& ctx, const ViewGPU& view, const LossParams& lp,
 }
 
 __global__ void accumulate_kernel(float* a) { a[2] += a[0] + a[1]; a[3] += 1.f; }
+void hollow_loss(RenderCtx& ctx, float lam, cudaStream_t stream) {
+  int npix = ctx.W * ctx.H;
+  hollow_reduce_kernel<<<div_up(npix, 256), 256, 0, stream>>>(npix, ctx.hollow_pen, lam, ctx.loss_accum);
+  CUDA_KERNEL_CHECK();
+}
+
 void accumulate_loss(RenderCtx& ctx, cudaStream_t stream) { accumulate_kernel<<<1, 1, 0, stream>>>(ctx.loss_accum.ptr); }
 
 void normal_loss(RenderCtx& ctx, const ViewGPU& view, const LossParams& lp, cudaStream_t stream) {

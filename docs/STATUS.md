@@ -1,6 +1,6 @@
 # b2ctrain: project state
 
-Last updated: 2026-09-07 (second session). Written for whoever (human or Claude) picks this up next.
+Last updated: 2026-09-09 (hollow loss). Written for whoever (human or Claude) picks this up next.
 
 ## One-line summary
 
@@ -136,6 +136,60 @@ b2crunner changes; the pipeline's `--conf-min-views 4` keeps its meaning. Measur
 `src/train/evidence.cu`): rim 10% -> 0%, face 1% -> 0%, subject 4.2% -> 3.1%; at a view 25 degrees above the orbit
 the culled fraction of opaque pixels 3.4% -> 0.5% (the black patches on the specular top go too); far-outside
 floater pixels kept 18 -> 36 per 720x1280 frame, i.e. unchanged in practice. Gradient tests pass (0/1156).
+
+### False transparency: the hollow loss (2026-09-09)
+
+The user reported that the trained splats are partly transparent: the front of a shirt is a half-opaque layer and
+the back of the shirt shows through it, moving with parallax as the view tilts (static renders look fine; the
+training orbit is reproduced either way, so nothing in the photometric loss opposes it). Two things were built:
+
+- **`b2ctrain probe`** (`src/render/probe.cpp`, `src/gpu/probe.cu`): per pixel, the compositing weight arriving from
+  more than `--delta` (3 cm) behind the first surface ("deep", first surface = accumulated alpha 0.1), and with a body
+  mesh the weight arriving from more than `--margin` behind it ("behind"). Reported over covered pixels (alpha > 0.5)
+  and over interior pixels (4 px from any silhouette) as probe.json plus heat maps. "deep" also counts legitimate
+  layering (hair in front of the face, folds), so compare it between runs rather than reading it as an absolute.
+- **The hollow loss** (`--hollow-weight`, `--hollow-margin`, `--hollow-dilate`, `--hollow-start-iter`, `--mesh`):
+  the body proxy mesh (`src/dataset/mesh.cpp` reads .ply/.obj) is depth-rasterised for the training view every step
+  (`src/gpu/meshdepth.cu`, one thread per triangle, atomicMin on float bits, then a farthest-in-window dilation so the
+  reference at a silhouette or fold is the deeper surface), and each pixel is charged
+  `sum_i vis_i * clamp((z_i - z_ref - margin) / margin, 0, 1)`. The gradient runs through the compositing weights only
+  (the depth is a constant): a fragment behind the surface is cheapest to remove by making everything in front of it
+  opaque, which is the intended fix, and nothing pulls the far side of the body forward through it. The growth
+  statistic stays photometric so the regulariser does not spawn splats. Tested in `tests/b2c_tests` (three extra
+  configurations against the double-precision reference; finite differences along the means are skipped there
+  because of the constant-depth choice).
+
+Measured on the example run's final-stage dataset (81 views, 1080p, `--match-alpha-weight 0.1`, no alignment, 4070
+Ti) against a Poisson proxy of the SAM-3D-Body mesh rebuilt from the dataset's 10k surface samples (the pipeline will
+pass the real mesh). Probe over every 8th training view; PSNR from `bench/eval_ply.py`:
+
+| run | deep (mean) | px with deep > 0.2 | behind body (mean) | PSNR | splats | time |
+|---|---|---|---|---|---|---|
+| baseline | 0.146 | 27.1% | 0.038 | 35.46 | 305k | 1m32s |
+| hollow 0.5, margin 0.05 | 0.102 | 17.8% | 0.0025 | 35.39 | 312k | 1m47s |
+| hollow 2.0, margin 0.05 | 0.092 | 16.3% | 0.0005 | 35.25 | 320k | 1m39s |
+| hollow 0.5, margin 0.03 | 0.088 | 15.7% | 0.0008 | 35.31 | 318k | 1m42s |
+
+(The 0.5 rows were re-measured after the growth statistic was made photometric-only; the 2.0 row predates that,
+which only changes which splats the growth samples.) Run to run the step cost is 5-15%.
+
+With the production argv (four alignment refits, hollow on through them): behind 0.0021, deep 0.094, PSNR against
+the pristine frames 33.26 vs 33.30 for the delivered aligned splat (alignment lowers that number by design),
+step 2m39s vs 2m38s. `out/hollow/before_after_pan-10.png` is the side-by-side.
+
+Stage 2 (117 views at 720p with masks, normals, support views, `--match-alpha-weight 0.5`) leaks less to begin
+with and moves the same way: behind 0.0066 -> 0.0020, deep 0.068 -> 0.063, PSNR 37.18 -> 37.23, 369k -> 385k splats,
+1m33s -> 1m44s.
+
+Off-orbit (elevated ±25°) views move the same way: deep 0.149 -> 0.113, behind 0.033 -> 0.003 (0.5 / 0.05). The
+remaining "deep" weight sits on hair in front of the face and inside the margin band. The delivered splat from the
+run (`ply/scene.ply`, aligned) measured deep 0.135 / behind 0.035, the same as the baseline retrain.
+
+b2crunner side (working tree, uncommitted): `render.py` publishes the oriented mesh as `mesh` (`scene.mesh_world` in
+the workflow, the same frame as `points_3d`), `steps/brush.py` writes it as `mesh.ply` beside the COLMAP model and
+passes the flags (`hollow_weight` / `hollow_margin` / `hollow_dilate` params; `tests/test_brush_hollow.py`), the
+doctor requires `--hollow-weight`, and both trainings in `fast_helical_native.yaml` set `hollow_weight: 0.5`.
+Splats to look at: `out/hollow/` (baseline, the three settings, the proxy mesh, camera sets).
 
 ## What's left
 
