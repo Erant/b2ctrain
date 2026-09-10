@@ -51,6 +51,26 @@ double read_val(const unsigned char* p, PType t) {
 }
 }  // namespace
 
+bool ply_is_vertex_only(const std::string& path) {
+  std::ifstream f(path, std::ios::binary);
+  if (!f) return false;
+  std::string line;
+  std::getline(f, line);
+  if (line.rfind("ply", 0) != 0) return false;
+  bool vertices = false;
+  while (std::getline(f, line)) {
+    if (!line.empty() && line.back() == '\r') line.pop_back();
+    std::istringstream ss(line);
+    std::string tok; ss >> tok;
+    if (tok == "element") {
+      std::string name; size_t cnt = 0; ss >> name >> cnt;
+      if (name == "vertex") vertices = cnt > 0;
+      else if (cnt > 0) return false;
+    } else if (tok == "end_header") break;
+  }
+  return vertices;
+}
+
 SplatCloud read_ply(const std::string& path) {
   std::ifstream f(path, std::ios::binary);
   if (!f) fail("failed to open ply '%s'", path.c_str());

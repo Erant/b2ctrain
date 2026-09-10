@@ -1,5 +1,6 @@
 #include "dataset/views.h"
 #include "util/log.h"
+#include "ply.h"
 #define STB_IMAGE_IMPLEMENTATION
 #define STBI_NO_HDR
 #define STBI_NO_LINEAR
@@ -97,11 +98,13 @@ Dataset load_dataset(const Config& cfg) {
   ColmapModel model = read_colmap_text(model_dir.string());
   ds.points = model.points;
 
-  // init.ply preferred, else the lexicographically last .ply in the dataset.
+  // init.ply preferred, else the lexicographically last .ply in the dataset. Triangle meshes are
+  // skipped: the hollow loss takes its proxy from <dataset>/mesh.ply, which is not a splat cloud.
   {
     std::vector<std::string> plys;
     for (auto& e : fs::recursive_directory_iterator(root, fs::directory_options::follow_directory_symlink))
-      if (e.is_regular_file() && lower(e.path().extension().string()) == ".ply") plys.push_back(e.path().string());
+      if (e.is_regular_file() && lower(e.path().extension().string()) == ".ply" && ply_is_vertex_only(e.path().string()))
+        plys.push_back(e.path().string());
     std::sort(plys.begin(), plys.end());
     for (auto& p : plys) if (fs::path(p).filename() == "init.ply") ds.init_ply = p;
     if (ds.init_ply.empty() && !plys.empty()) ds.init_ply = plys.back();

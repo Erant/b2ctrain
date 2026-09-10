@@ -27,6 +27,10 @@ struct SplatCloud {
 
 extern const char* const EVIDENCE_FIELDS[7];
 
+// Header-only probe: true when the file is a ply read_ply can load, i.e. one whose only
+// non-empty element is 'vertex'. A triangle mesh (the hollow proxy's mesh.ply) is not.
+bool ply_is_vertex_only(const std::string& path);
+
 SplatCloud read_ply(const std::string& path);
 void write_ply(const std::string& path, const SplatCloud& c, const std::vector<std::string>& comments);
 
