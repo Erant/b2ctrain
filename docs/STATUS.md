@@ -422,6 +422,55 @@ s1 at NOVEL cameras (train differs by <1%); seed noise <1%. Findings:
 Not wired: `body_rig` (and `align_iters`) on `train_splat` in b2crunner, with the support views excluded from the
 rig's view list. The rig would come from `reconstruct_body`'s mesh + `rig_binding` rather than from the refit.
 
+### The navel and the uncommitted hollow-tau/push diff (2026-09-10)
+
+The working tree carries an unfinished diff (`hollow_tau` 0.1 and `hollow_push_tau` 0.5 on by default,
+`hollow_front_alpha` 0 off) written for a report that the hollow loss pushed a soft skin surface ~2 cm towards the
+camera and buried the navel. None of it is in HEAD, so the pinned trainer and every shipped image lack it. Two facts
+worth recording before deciding its fate:
+
+- **The hollow loss has never run in a production bundle.** All 32 result bundles in ~/Downloads, up to and including
+  20260909-151011, have no `--mesh` and no `--hollow-weight` in either training's argv. An intact navel in those
+  splats says nothing about the loss. b2crunner main now turns it on for both trainings (0.5, margin 0.03 against the
+  refit body), so the next pod run is the first that will exercise it.
+- **Every rig run in out/catch was trained WITH the diff active** — `run_rig.sh` used ./build/b2ctrain and
+  b2ctrain_{all,gm,sharedv} all carry the three flags (they were built from the working tree before ee71363 was split
+  out of it). The clean HEAD binary is the /tmp/b2c_wt worktree. So the arm-rig table above and the navel in those
+  runs were measured with the navel diff on.
+
+Measured (F3 bundle, production stage-5 argv, 30k, anchor camera frame_00038_ = the re-injected pristine photo;
+navel ROI x 449-649, y 705-865; runs in out/inter's sibling out/navel/, scripts run.sh / run2.sh, navel_eval.py):
+
+| run | trainer | hollow | mean ROI depth | relief | PSNR | navel |
+|-----|---------|--------|----------------|--------|------|-------|
+| none          | HEAD | off               | 2.0401 m | 4.56 mm | 33.235 | present |
+| refit_m03     | HEAD | 0.5 @ 3 cm, refit | 2.0377   | 4.71    | 33.231 | present |
+| sam_m03       | HEAD | 0.5 @ 3 cm, SAM   | 2.0364   | 4.39    | 33.032 | present |
+| refit_tau     | diff | 0.5 @ 3 cm, refit | 2.0397   | 4.19    | 33.211 | present |
+| sam_m001_head | HEAD | 0.5 @ 1 cm, SAM   | 2.0338   | 4.02    | 32.695 | present |
+| sam_m001_tau  | diff | 0.5 @ 1 cm, SAM   | 2.0365   | 4.38    | 32.405 | present |
+| sam_w2_head   | HEAD | 2.0 @ 1 cm, SAM   | 2.0320   | 3.34    | 32.459 | present |
+
+`refit_m03` is what main will now run; it is indistinguishable from the no-hollow baseline at the navel and 0.004 dB
+from it. The navel survived every configuration tried, including a deliberately abusive one. On the user's own read of
+the panel `refit_m03` is the best of the seven and every SAM-mesh run is subpar — which the PSNR agrees with (33.231
+against 33.032 / 32.695 / 32.459) and is a second argument for the refit body carrying the hollow loss.
+
+The mechanism the diff was written for is real but an order of magnitude smaller here than reported. The surface does
+migrate towards the camera under the loss, and the diff does halve it: at 1 cm / weight 0.5 the ROI's first surface
+moves 6.3 mm forward on HEAD against 3.6 mm with the diff; at weight 2.0 on HEAD it is 8.1 mm, with the relief
+flattening 4.56 -> 3.34 mm. It never reaches the ~2 cm that would fill a navel in.
+
+The premise does not hold for this subject either: out/refit/stats.json puts SAM-3D-Body's body a median 1.33 cm from
+the splat surface (mean signed +1.02 cm, 24.7% inside by >5 mm), not the 2-5 cm the diff's comments describe. The
+likeliest explanation for the original report is the mesh it was seen with — the earlier real-SAM mesh registered onto
+points3D.txt by similarity ICP, before the refit existed — rather than the loss itself. That is a hypothesis, not a
+measurement: the burial was not reproduced here.
+
+Also noted while reading it: the diff is internally inconsistent (`render.h` defaults `hollow_push_tau` to 0.f while
+`cli.h` defaults it to 0.5f, so anything building RenderParams directly gets the push ungated), and its two halves are
+coupled — `--hollow-tau 0` with the rest of it measured 33.8 dB / deep 0.156, worse than either end.
+
 ## What's left
 
 - **Commit the b2crunner side.** Its working tree (`~/Projects/b2crunner`) has uncommitted changes from this work in
