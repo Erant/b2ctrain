@@ -367,6 +367,61 @@ Not in b2crunner yet: the rig builder (`out/catch/build_rig2.py`, needs only the
 whether the learned arm trajectory should ALSO drive the frames (re-warping the frames onto the posed render), and
 whether the render-side warp stacks with the rig.
 
+### The rig at the INTERMEDIATE stage (2026-09-10)
+
+The rig was built for `train_final_splat`. Tested at stage 2 (`train_splat`) on the same bundle
+(`~/Downloads/fast_helical_native-F3-pass2-shift5-20260909-020603-792cf0-result`, `colmap_intermediate`: 81 orbit
+frames at 720p + 36 face-support renders). `colmap_intermediate` and `colmap` are **different trajectories in the
+same world frame** (a planar 81-frame orbit, 4.5 deg/frame, vs the helical re-render, 10.4 deg/frame): the
+intermediate splat, the delivered splat and `out/refit/mesh_refit.ply` agree to ~1 cm, so the refit body drops
+straight in with no re-registration. Do NOT match the two datasets by frame name — the same name is a different
+camera.
+
+The problem is present at stage 2 and relatively worse than at stage 5. Adjacent-frame limb motion beyond the static
+body mesh (mm at the subject, so the two stages compare): intermediate torso/legs 1.4-1.9, upper arm 8.0-9.2,
+forearm 10.9-13.2, hand 12.0-12.3; final 2.3-3.2 / 9.5-9.9 / 9.0-9.2 / 7.4-8.4. Arms move ~6x the torso baseline at
+stage 2, ~3x at stage 5.
+
+Runs: production stage-2 argv, 30k iters, rig params as b2crunner ships them (start 1000, smooth 0.05, zero 0.02,
+lr 0.002), rig over the 81 frames only. `out/inter/`, scripts `run_base.sh` / `run_rig{,2,3}.sh`,
+`build_inter_rig.py` (the production `pipeline.body_rig.build_body_rig`, 104/127 joints active), `eval_inter.sh`.
+
+| run | s1 body | s1 hands | s1 head | s1 subject | canonical PSNR | time |
+|-----|---------|----------|---------|------------|----------------|------|
+| base            | 51.26 | 84.38  | 43.06 | 51.64 | 38.07 | 1m32s |
+| base2 (seed 43) | 51.23 | 84.45  | 43.53 | 51.65 | 38.07 | 1m31s |
+| align           | 55.83 | 84.91  | 48.20 | 56.12 | 37.10 | 1m30s |
+| rig (SAM body)  | 54.99 | 107.13 | 47.10 | 55.81 | 33.34 | 1m32s |
+| rig, seed 43    | 55.03 | 106.82 | 46.42 | 55.76 | 33.43 | 1m31s |
+| rig (refit body)| 55.29 | 105.58 | 45.76 | 55.88 | 33.40 | 1m32s |
+| rig + align     | 57.52 | 100.48 | 49.37 | 58.00 | 33.43 | 1m32s |
+| rig over all 117 views | 55.19 | 107.02 | 43.10 | 55.59 | 31.46 | 1m33s |
+
+s1 at NOVEL cameras (train differs by <1%); seed noise <1%. Findings:
+
+- **The rig and the 2D alignment loop are nearly orthogonal.** Alignment fixes body (+9%) and head (+12%) and does
+  nothing for the hands (+0.6%); the rig is the only thing that fixes the hands (+27%). Together: body +12%, head
+  +15%, hands +19%, subject +12% — the best of the eight. Visually the baseline arms are ghosted and translucent
+  with a smeared hand; `align` sharpens the top and torso but leaves the arm ghost; the rig makes the arm solid and
+  the fingers defined (`out/inter/arm_novel_0000{1,41}__4way.png`).
+- **The SAM-3D-Body body is as good as the refit body here** (hands 107.1 vs 105.6, head 47.1 vs 45.8). Stage 2 does
+  not need a splat refit — the body from `reconstruct_body` is enough, which is what makes this wirable at all
+  (at stage-2 time there is no splat to refit to).
+- **The rig must cover only the real frames.** Extending it over the 36 face-support renders keeps the body and hand
+  gains but loses the whole head gain (47.1 -> 43.1, baseline). b2crunner's brush step writes the rig for
+  `list(image_names)`, so wiring `body_rig` at stage 2 needs the support views filtered out.
+- Canonical PSNR falls 38.07 -> 33.34, and the split says why: the 81 frames go 33.86 -> 27.20 while the 36
+  undeformed support views are untouched (47.91 -> 47.85). Training loss is unchanged (-0.19651 vs -0.19649). Not
+  the metric, as at stage 5.
+- The learned rotations are dominated by torso 1.8 deg, head 1.4, legs 1.3 — arms only 0.3-0.8 (the opposite of
+  stage 5, where the alignment loop has already absorbed the body-scale wobble). Per-view |rotation| mean 0.74 deg,
+  max 5.7; |mean over views| per joint 0.23 deg, so the canonical pose stays the average pose. Mean over views of
+  the max hand displacement from canonical: 40 mm.
+- Cost is nil: 1m32s either way, 365k splats vs 369k.
+
+Not wired: `body_rig` (and `align_iters`) on `train_splat` in b2crunner, with the support views excluded from the
+rig's view list. The rig would come from `reconstruct_body`'s mesh + `rig_binding` rather than from the refit.
+
 ## What's left
 
 - **Commit the b2crunner side.** Its working tree (`~/Projects/b2crunner`) has uncommitted changes from this work in
