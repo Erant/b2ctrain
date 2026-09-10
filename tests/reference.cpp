@@ -82,7 +82,7 @@ double reference_loss(const SplatCloud& c, const RefParams& p) {
   std::vector<double> img((size_t)W * H * 4, 0.0), feat((size_t)W * H * 3, 0.0);
   double hollow = 0.0;
   for (int py = 0; py < H; py++) for (int px = 0; px < W; px++) {
-    double T = 1, r = 0, g = 0, b = 0, f0 = 0, f1 = 0, f2 = 0;
+    double T = 1, r = 0, g = 0, b = 0, f0 = 0, f1 = 0, f2 = 0, z_first = INFINITY;
     double pcx = px + 0.5, pcy = py + 0.5;
     for (int i : order) {
       const Proj& q = pr[i];
@@ -95,7 +95,16 @@ double reference_loss(const SplatCloud& c, const RefParams& p) {
       double vis = alpha * T;
       r += std::max(q.r, 0.0) * vis; g += std::max(q.g, 0.0) * vis; b += std::max(q.b, 0.0) * vis;
       f0 += q.fx * vis; f1 += q.fy * vis; f2 += q.fz * vis;
-      if (p.hollow_z) { double zr = (*p.hollow_z)[(size_t)py * W + px]; double d = (q.depth - zr - p.hollow_margin) / std::max(p.hollow_margin, 1e-4); if (std::isfinite(d)) hollow += vis * std::min(std::max(d, 0.0), 1.0); }
+      if (p.hollow_z) {
+        double zr = (*p.hollow_z)[(size_t)py * W + px];
+        if (p.hollow_tau > 0) {
+          // Adaptive reference: the first fragment that brings the accumulated alpha to tau sets z_first; the
+          // reference for the fragments after it is the deeper of the mesh and z_first.
+          if (std::isfinite(z_first)) zr = std::max(zr, z_first);
+          else { if (1 - nT >= p.hollow_tau) z_first = q.depth; zr = INFINITY; }
+        }
+        double d = (q.depth - zr - p.hollow_margin) / std::max(p.hollow_margin, 1e-4); if (std::isfinite(d)) hollow += vis * std::min(std::max(d, 0.0), 1.0);
+      }
       T = nT;
     }
     size_t o = (size_t)py * W + px;

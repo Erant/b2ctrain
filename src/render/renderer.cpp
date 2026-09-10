@@ -31,6 +31,7 @@ struct RenderArgs {
   ConfidenceParams conf;
   Config ds_cfg;  // dataset options for --dataset
   int device = 0;
+  int sh_degree = -1;
 };
 
 const char* HELP =
@@ -42,7 +43,8 @@ const char* HELP =
 "      --output-dir <OUTPUT_DIR>        Directory to write one RGBA image per camera into [default: out]\n"
 "      --background <BACKGROUND>        Background color composited under the splat's accumulated alpha, as \"r,g,b\" in 0..1. Ignored with --confidence [default: 1.0,1.0,1.0]\n"
 "      --output-format <OUTPUT_FORMAT>  Image encoder (png only) [default: png]\n"
-"      --device <N>                     CUDA device [default: 0]\n\n"
+"      --device <N>                     CUDA device [default: 0]\n"
+"      --sh-degree <N>                  Evaluate only SH bands up to N (0 = DC colour only, a view-independence check) [default: the ply's]\n\n"
 "Confidence options:\n"
 "      --confidence                     Gate every pixel by the per-splat multi-view confidence\n"
 "      --cull-color <CULL_COLOR>        Colour culled pixels resolve to and the compositing background [default: 0.5,0.5,0.5]\n"
@@ -78,6 +80,7 @@ RenderArgs parse_render_args(int argc, char** argv) {
     else if (k == "--output-format") a.output_format = val("--output-format");
     else if (k == "--background") parse_rgb(val("--background"), a.background, "--background");
     else if (k == "--device") a.device = atoi(val("--device").c_str());
+    else if (k == "--sh-degree") a.sh_degree = atoi(val("--sh-degree").c_str());
     else if (k == "--confidence") a.confidence = true;
     else if (k == "--cull-color") parse_rgb(val("--cull-color"), a.cull, "--cull-color");
     else if (k == "--gate-lo") a.gate_lo = parse_float(val(k.c_str()), "--gate-lo");
@@ -178,7 +181,7 @@ int render_main(int argc, char** argv) {
     RenderParams p; p.cam = CameraGPU::from(cam, W, H);
     const float* bg = gated ? a.cull : a.background;
     p.bg[0] = bg[0]; p.bg[1] = bg[1]; p.bg[2] = bg[2];
-    p.sh_degree = model.degree; p.bwd_info = false;
+    p.sh_degree = a.sh_degree >= 0 ? std::min(a.sh_degree, model.degree) : model.degree; p.bwd_info = false;
     if (gated) { conf.for_camera(cam.pos, stream); p.feat = FeatureMode::Buffer; p.feat_buffer = conf.feature; }
     render_forward(ctx, model, p, stream);
     auto out = ctx.out_rgba.download((size_t)W * H, stream);

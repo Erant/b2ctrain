@@ -12,7 +12,7 @@ struct RefParams {
   bool composite, mask, alpha_lane, normals;
   double l1_w, ssim_w, match_alpha_weight, scale, normal_scale;
   const std::vector<uint32_t>* gt; const std::vector<uint32_t>* gtn; const std::vector<uint8_t>* wts;
-  const std::vector<float>* hollow_z = nullptr; double hollow_lam = 0, hollow_margin = 0.05;  // hollow loss (per-pixel reference depth)
+  const std::vector<float>* hollow_z = nullptr; double hollow_lam = 0, hollow_margin = 0.05, hollow_tau = 0.1;  // hollow loss (per-pixel reference depth)
 };
 // Returns the total loss (photometric + normal) for the cloud under the given params.
 double reference_loss(const b2c::SplatCloud& c, const RefParams& p);

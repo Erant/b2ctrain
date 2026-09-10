@@ -80,6 +80,9 @@ struct Config {
   uint32_t hollow_start_iter = 0;     // first iteration the loss is applied
   std::string hollow_proxy = "auto"; // auto: mesh if present, else discs on points3D; mesh; points
   float hollow_points_radius = 0.f;   // surfel radius for the points proxy, 0 = 4x the median point spacing
+  float hollow_push_tau = 0.5f;       // only fragments at or behind the pixel's depth at this accumulated alpha get the opacity push; 0 = all
+  float hollow_front_alpha = 0.f;     // scale the opacity push on fragments in front of penalised weight by min(alpha/this, 1); 0 = exact gradient
+  float hollow_tau = 0.1f;            // adaptive reference: deeper of mesh and the splat's own first surface (alpha >= tau); 0 = mesh only
   int device = 0;
   std::string checkpoint_dir;         // debug dumps
   bool help = false;

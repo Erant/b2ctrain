@@ -33,7 +33,7 @@ __global__ void __launch_bounds__(RT_PX) raster_bwd_tc_kernel(
     const float4* __restrict__ out_rgba, const float4* __restrict__ out_feat, const uint32_t* __restrict__ last_idx,
     const float4* __restrict__ v_out, const float4* __restrict__ v_feat_in,
     int W, int H, int tiles_x, float3 bg, float inv_gscale,
-    const float* __restrict__ hollow_z, float hollow_margin, float hollow_lam,
+    const float* __restrict__ hollow_z, const float* __restrict__ hollow_zfirst, const float* __restrict__ hollow_zpush, float hollow_margin, float hollow_lam, float hollow_front_alpha,
     float* __restrict__ v_splat, uint32_t* __restrict__ vis_flag) {
   extern __shared__ __align__(128) unsigned char smem[];
   __half* A = (__half*)smem;                                   // [NTYPES][GROUP][RT_PX]
@@ -75,8 +75,8 @@ __global__ void __launch_bounds__(RT_PX) raster_bwd_tc_kernel(
     b[12] = __float2half(1.f); b[13] = __float2half(0.f); b[14] = __float2half(0.f); b[15] = __float2half(0.f);
   }
   float3 S = make_float3(0, 0, 0), Sf = make_float3(0, 0, 0);
-  float Sh = 0.f, z_ref = INFINITY;
-  if constexpr (HOLLOW) { if (inside) z_ref = hollow_z[pix]; }
+  float Sh = 0.f, z_ref = INFINITY, z_push = -INFINITY;
+  if constexpr (HOLLOW) { if (inside) { float zf = hollow_zfirst[pix]; z_ref = isfinite(zf) ? fmaxf(hollow_z[pix], zf) : (zf < 0.f ? hollow_z[pix] : INFINITY); z_push = hollow_zpush[pix]; } }
   const float inv_final_a = 1.f / fmaxf(final_a, 1e-5f);
   const float Wf = (float)W, Hf = (float)H;
 
@@ -127,7 +127,7 @@ __global__ void __launch_bounds__(RT_PX) raster_bwd_tc_kernel(
                 v_alpha += (T_before * fx - Sf.x * ra) * vf.x + (T_before * fy - Sf.y * ra) * vf.y + (T_before * fz - Sf.z * ra) * vf.z;
               }
               float hh = 0.f, v_sigma_photo = -alpha * v_alpha;  // the growth statistic below is photometric only
-              if constexpr (HOLLOW) { hh = hollow_h(c.z, z_ref, hollow_margin); v_alpha += hollow_lam * (T_before * hh - Sh * ra); }
+              if constexpr (HOLLOW) { hh = hollow_h(c.z, z_ref, hollow_margin); float gate = (hollow_front_alpha > 0.f ? fminf(alpha / hollow_front_alpha, 1.f) : 1.f) * (c.z >= z_push ? 1.f : 0.f); v_alpha += hollow_lam * (T_before * hh - Sh * ra * gate); }
               float v_sigma = -alpha * v_alpha;
               if (c.y * gauss <= ALPHA_MAX) {
                 s_va = v_alpha * gauss; s_vs = v_sigma;
@@ -215,7 +215,7 @@ void rasterize_backward_tc(RenderCtx& ctx, const Model& m, const RenderParams& p
   const float lam = p.hollow_lam * grad_scale;
 #define L(F, HO, slot) do { \
     if (!g_attr_set[slot]) { CUDA_CHECK(cudaFuncSetAttribute(raster_bwd_tc_kernel<F, HO>, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem)); g_attr_set[slot] = true; } \
-    raster_bwd_tc_kernel<F, HO><<<grid, block, smem, stream>>>(ctx.tile_ranges, ctx.vals_sorted, ctx.proj0, ctx.proj1, ctx.proj2, ctx.proj3, ctx.out_rgba, ctx.out_feat, ctx.last_idx, ctx.v_out, ctx.v_feat, ctx.W, ctx.H, ctx.tiles_x, bg, inv, p.hollow_z, p.hollow_margin, lam, ctx.v_splat, ctx.vis_flag); \
+    raster_bwd_tc_kernel<F, HO><<<grid, block, smem, stream>>>(ctx.tile_ranges, ctx.vals_sorted, ctx.proj0, ctx.proj1, ctx.proj2, ctx.proj3, ctx.out_rgba, ctx.out_feat, ctx.last_idx, ctx.v_out, ctx.v_feat, ctx.W, ctx.H, ctx.tiles_x, bg, inv, p.hollow_z, ctx.hollow_zfirst, ctx.hollow_zpush, p.hollow_margin, lam, p.hollow_front_alpha, ctx.v_splat, ctx.vis_flag); \
   } while (0)
   if (feat) { if (hollow) L(true, true, 3); else L(true, false, 1); }
   else { if (hollow) L(false, true, 2); else L(false, false, 0); }

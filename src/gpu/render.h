@@ -49,6 +49,19 @@ struct RenderParams {
   const float* hollow_z = nullptr;
   float hollow_margin = 0.05f;
   float hollow_lam = 0.f;       // dL/d(penalised weight) per pixel, before grad_scale
+  // Adaptive reference: the reference depth is the deeper of the mesh surface and the splat's own first surface, the
+  // depth at which the accumulated alpha first reaches `hollow_tau` (0 = mesh only). A body mesh that is bigger than
+  // the subject (SAM-3D-Body's was 2-5 cm in front of a slim torso) then no longer puts the real skin, and the navel
+  // a little behind it, inside the penalty; a floater in front of the mesh cannot lower the reference either.
+  float hollow_tau = 0.1f;
+  // The push that makes fragments in front of penalised weight more opaque is scaled by min(alpha / front_alpha, 1):
+  // a faint fragment (the soft front of a surface, haze) is hardened in proportion to what it already contributes, so
+  // the substantial part of the surface wins the race to opacity instead of the fuzz in front of it (which moved a
+  // soft skin surface 2 cm towards the camera and buried the navel behind it). 0 = the exact gradient.
+  float hollow_front_alpha = 0.f;
+  // Only fragments at or behind the pixel's own depth at accumulated alpha `hollow_push_tau` receive that push: the
+  // surface then hardens at its bulk rather than at the soft fuzz in front of it. 0 = every fragment in front.
+  float hollow_push_tau = 0.f;
 };
 
 // Persistent scratch for rendering one view; grows on demand.
@@ -72,6 +85,8 @@ struct RenderCtx {
   DevBuf<float4> out_rgba;    // final rgb (with bg) + alpha
   DevBuf<float4> out_feat;    // feat xyz + final transmittance
   DevBuf<float> hollow_pen;   // per-pixel sum of weight * h(depth) when the hollow loss is on
+  DevBuf<float> hollow_zfirst; // per-pixel first-surface depth (accumulated alpha >= tau), +inf if never reached
+  DevBuf<float> hollow_zpush;  // per-pixel depth at accumulated alpha >= push_tau (-inf when push_tau = 0)
   DevBuf<uint32_t> last_idx;  // one past the last contributing intersection per pixel
   // backward
   DevBuf<float> v_splat;      // [n][13] per-splat 2D gradients: xy(2) conic(3) rgb(3) opac(1) refine(1) feat(3)

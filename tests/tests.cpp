@@ -57,9 +57,9 @@ static Scene make_scene(uint64_t seed, int n) {
 struct Harness {
   Model model; RenderCtx ctx; DevBuf<uint32_t> gt, gtn; DevBuf<uint8_t> wts; DevBuf<float> hz; ViewGPU view; LossParams lp; RenderParams rp; Scene* sc;
   PinnedBuf<float> h; DevBuf<float> grads;
-  bool hollow = false;
-  void setup(Scene& s, bool masked, bool normals, bool with_hollow = false) {
-    sc = &s; hollow = with_hollow;
+  bool hollow = false; float hollow_tau = 0.1f;
+  void setup(Scene& s, bool masked, bool normals, bool with_hollow = false, float tau = 0.1f) {
+    sc = &s; hollow = with_hollow; hollow_tau = tau;
     model.upload(s.cloud);
     ctx.setup(s.W, s.H, model.cap, 0);
     gt.upload(s.gt); gtn.upload(s.gtn); wts.upload(s.wts);
@@ -69,7 +69,7 @@ struct Harness {
     lp.normal_scale = normals ? 0.05f / 100.f : 0.f;
     rp.cam = CameraGPU::from(s.cam, s.W, s.H); for (int k = 0; k < 3; k++) rp.bg[k] = lp.bg[k];
     rp.sh_degree = s.degree; rp.feat = normals ? FeatureMode::Normals : FeatureMode::None; rp.bwd_info = true;
-    if (hollow) { hz.upload(s.hollow_z); rp.hollow_z = hz; rp.hollow_margin = 0.05f; rp.hollow_lam = 0.7f / (float)(s.W * s.H); }
+    if (hollow) { hz.upload(s.hollow_z); rp.hollow_z = hz; rp.hollow_margin = 0.05f; rp.hollow_lam = 0.7f / (float)(s.W * s.H); rp.hollow_tau = hollow_tau; }
     h.reserve(16);
   }
   double loss() {
@@ -228,16 +228,17 @@ int main(int argc, char** argv) {
   if (deform_fails) printf("deform: %d failure(s)\n", deform_fails);
   if (argc > 1) g_eps = (float)atof(argv[1]);
   int fails = 0, total = 0, skipped = 0;
-  for (int cfg = 0; cfg < 9; cfg++) {
+  for (int cfg = 0; cfg < 12; cfg++) {
     bool masked = cfg % 3 == 1, normals = cfg % 3 == 2, tc = cfg >= 3, hollow = cfg >= 6;
+    float tau = cfg >= 9 ? 0.1f : 0.f;  // 6-8: mesh reference only; 9-11: adaptive reference
     Scene s = make_scene(1234 + cfg % 3, 24);
-    Harness hs; hs.setup(s, masked, normals, hollow); hs.tc = tc;
+    Harness hs; hs.setup(s, masked, normals, hollow, tau); hs.tc = tc;
     std::vector<float> an = hs.analytic();
     RefParams rp; rp.W = s.W; rp.H = s.H; rp.cam = s.cam; for (int k = 0; k < 3; k++) rp.bg[k] = hs.lp.bg[k];
     rp.composite = hs.lp.composite; rp.mask = hs.lp.mask; rp.alpha_lane = hs.lp.alpha_lane; rp.normals = normals;
     rp.l1_w = hs.lp.l1_w; rp.ssim_w = hs.lp.ssim_w; rp.match_alpha_weight = hs.lp.match_alpha_weight; rp.scale = hs.lp.scale; rp.normal_scale = hs.lp.normal_scale;
     rp.gt = &s.gt; rp.gtn = &s.gtn; rp.wts = &s.wts;
-    if (hollow) { rp.hollow_z = &s.hollow_z; rp.hollow_lam = hs.rp.hollow_lam; rp.hollow_margin = hs.rp.hollow_margin; }
+    if (hollow) { rp.hollow_z = &s.hollow_z; rp.hollow_lam = hs.rp.hollow_lam; rp.hollow_margin = hs.rp.hollow_margin; rp.hollow_tau = tau; }
     double gpu_loss = hs.loss(), ref_loss = reference_loss(s.cloud, rp);
     printf("cfg %d: gpu loss %.7f reference loss %.7f (rel diff %.2e)\n", cfg, gpu_loss, ref_loss, std::abs(gpu_loss - ref_loss) / std::abs(ref_loss));
     int K = s.cloud.K(); size_t per = 11 + K * 3;
@@ -270,7 +271,7 @@ int main(int argc, char** argv) {
         max_rel = std::max(max_rel, rel);
       }
     }
-    printf("cfg %d (%s%s%s%s): checked %d params, max rel err %.4f\n", cfg, masked ? "masked" : "transparent", normals ? "+normals" : "", tc ? " tc" : " warp", hollow ? " +hollow" : "", checked, max_rel);
+    printf("cfg %d (%s%s%s%s): checked %d params, max rel err %.4f\n", cfg, masked ? "masked" : "transparent", normals ? "+normals" : "", tc ? " tc" : " warp", hollow ? (tau > 0.f ? " +hollow(adaptive)" : " +hollow") : "", checked, max_rel);
   }
   printf("%d / %d mismatches (%d non-smooth points skipped)\n", fails, total, skipped);
   if (align_fails) printf("%d alignment test failure(s)\n", align_fails);

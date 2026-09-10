@@ -14,7 +14,7 @@ __global__ void __launch_bounds__(RT_PX) raster_bwd_kernel(
     const float4* __restrict__ out_rgba, const float4* __restrict__ out_feat, const uint32_t* __restrict__ last_idx,
     const float4* __restrict__ v_out, const float4* __restrict__ v_feat_in,
     int W, int H, int tiles_x, float3 bg,
-    const float* __restrict__ hollow_z, float hollow_margin, float hollow_lam,
+    const float* __restrict__ hollow_z, const float* __restrict__ hollow_zfirst, const float* __restrict__ hollow_zpush, float hollow_margin, float hollow_lam, float hollow_front_alpha,
     float* __restrict__ v_splat, uint32_t* __restrict__ vis_flag) {
   __shared__ float4 s0[RT_PX], s1[RT_PX], s2[RT_PX];
   __shared__ float2 s3[RT_PX];
@@ -44,8 +44,8 @@ __global__ void __launch_bounds__(RT_PX) raster_bwd_kernel(
     v_o_w = (vo.w - (bg.x * vo.x + bg.y * vo.y + bg.z * vo.z)) * T;
   }
   float3 S = make_float3(0, 0, 0), Sf = make_float3(0, 0, 0);
-  float Sh = 0.f, z_ref = INFINITY;
-  if constexpr (HOLLOW) { if (inside) z_ref = hollow_z[pix]; }
+  float Sh = 0.f, z_ref = INFINITY, z_push = -INFINITY;
+  if constexpr (HOLLOW) { if (inside) { float zf = hollow_zfirst[pix]; z_ref = isfinite(zf) ? fmaxf(hollow_z[pix], zf) : (zf < 0.f ? hollow_z[pix] : INFINITY); z_push = hollow_zpush[pix]; } }
   const float inv_final_a = 1.f / fmaxf(final_a, 1e-5f);
   const float Wf = (float)W, Hf = (float)H;
 
@@ -93,7 +93,7 @@ __global__ void __launch_bounds__(RT_PX) raster_bwd_kernel(
             v_alpha += (T_before * fx - Sf.x * ra) * vf.x + (T_before * fy - Sf.y * ra) * vf.y + (T_before * fz - Sf.z * ra) * vf.z;
           }
           float hh = 0.f, v_sigma_photo = -alpha * v_alpha;  // the growth statistic (g[9]) is photometric only
-          if constexpr (HOLLOW) { hh = hollow_h(c.z, z_ref, hollow_margin); v_alpha += hollow_lam * (T_before * hh - Sh * ra); }
+          if constexpr (HOLLOW) { hh = hollow_h(c.z, z_ref, hollow_margin); float gate = (hollow_front_alpha > 0.f ? fminf(alpha / hollow_front_alpha, 1.f) : 1.f) * (c.z >= z_push ? 1.f : 0.f); v_alpha += hollow_lam * (T_before * hh - Sh * ra * gate); }
           float v_sigma = -alpha * v_alpha;
           // Note dx here is pixel - mean; brush uses mean - pixel with the same formulas, sign cancels in dx*dx
           // but not in the xy gradient: d sigma / d mean = -(conic * d) with d = pixel - mean.
@@ -144,7 +144,7 @@ void rasterize_backward(RenderCtx& ctx, const Model& m, const RenderParams& p, c
   float3 bg = make_float3(p.bg[0], p.bg[1], p.bg[2]);
   dim3 grid(ctx.n_tiles), block(RT_PX);
   const bool feat = p.feat != FeatureMode::None, hollow = p.hollow_z != nullptr && p.hollow_lam != 0.f;
-#define L(F, HO) raster_bwd_kernel<F, HO><<<grid, block, 0, stream>>>(ctx.tile_ranges, ctx.vals_sorted, ctx.proj0, ctx.proj1, ctx.proj2, ctx.proj3, ctx.out_rgba, ctx.out_feat, ctx.last_idx, ctx.v_out, ctx.v_feat, ctx.W, ctx.H, ctx.tiles_x, bg, p.hollow_z, p.hollow_margin, p.hollow_lam, ctx.v_splat, ctx.vis_flag)
+#define L(F, HO) raster_bwd_kernel<F, HO><<<grid, block, 0, stream>>>(ctx.tile_ranges, ctx.vals_sorted, ctx.proj0, ctx.proj1, ctx.proj2, ctx.proj3, ctx.out_rgba, ctx.out_feat, ctx.last_idx, ctx.v_out, ctx.v_feat, ctx.W, ctx.H, ctx.tiles_x, bg, p.hollow_z, ctx.hollow_zfirst, ctx.hollow_zpush, p.hollow_margin, p.hollow_lam, p.hollow_front_alpha, ctx.v_splat, ctx.vis_flag)
   if (feat) { if (hollow) L(true, true); else L(true, false); }
   else { if (hollow) L(false, true); else L(false, false); }
 #undef L

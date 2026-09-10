@@ -140,11 +140,11 @@ int train_main(const Config& cfg) {
       log_info("Hollow proxy from points: %zu points of points3D.txt as surfels of radius %.4f (median spacing %.4f)%s", ds.points.size(), radius, spacing, mpath.empty() ? " because no mesh was given" : "");
     }
     if (cfg.hollow_weight > 0.f && !have_mesh) log_warn("--hollow-weight %g given but no proxy surface (%s): the hollow loss is OFF", cfg.hollow_weight, cfg.hollow_proxy == "mesh" ? "no --mesh and no mesh.ply in the dataset" : "no mesh, and fewer than 100 points to build the points proxy from");
-    if (cfg.hollow_weight > 0.f && have_mesh) log_info("Hollow loss on: weight %g, margin %g, dilate %u px, from iteration %u", cfg.hollow_weight, cfg.hollow_margin, cfg.hollow_dilate, cfg.hollow_start_iter);
+    if (cfg.hollow_weight > 0.f && have_mesh) log_info("Hollow loss on: weight %g, margin %g, dilate %u px, tau %g (%s), from iteration %u", cfg.hollow_weight, cfg.hollow_margin, cfg.hollow_dilate, cfg.hollow_tau, cfg.hollow_tau > 0.f ? "reference = deeper of mesh and own first surface" : "reference = mesh", cfg.hollow_start_iter);
+    if (cfg.hollow_weight > 0.f && have_mesh) log_info("Hollow opacity push: fragments at or behind the pixel's depth at accumulated alpha %g%s", cfg.hollow_push_tau, cfg.hollow_front_alpha > 0.f ? format(", scaled by min(alpha / %g, 1)", cfg.hollow_front_alpha).c_str() : "");
   }
   const bool hollow_on = cfg.hollow_weight > 0.f && have_mesh;
 
-  StageTimer timer; timer.enabled = cfg.bench; timer.init();
   // Articulated per-view deformation (gpu/deform.h).
   BodyRig rig; bool have_rig = false;
   std::vector<int> rig_view(ds.train.size(), -1);
@@ -170,6 +170,7 @@ int train_main(const Config& cfg) {
     if (have_mesh && mesh.nv > 0) rig.pose_points(rig_view[vi], mesh_canon, mesh_bj, mesh_bw, mesh.nv, mesh.v, stream);
   };
 
+  StageTimer timer; timer.enabled = cfg.bench; timer.init();
   PinnedBuf<float> h_loss; h_loss.reserve(16);
   double isect_sum = 0; uint32_t isect_max = 0; uint32_t steps_timed = 0;
   const std::vector<ViewGPU>* evidence_views = &gv.views;  // the frames evidence is measured against (warped ones after alignment)
@@ -229,9 +230,9 @@ int train_main(const Config& cfg) {
       for (int k = 0; k < 3; k++) bg[k] = std::min(std::max(cfg.background_color[k] + uni(rng) * cfg.background_noise_strength, 0.f), 1.f);
 
       RenderParams rp; rp.cam = CameraGPU::from(cam, view.W, view.H);
-      for (int k = 0; k < 3; k++) rp.bg[k] = bg[k];
       rp.warp = view.warp; rp.warp_w = view.warp_w; rp.warp_h = view.warp_h;
       pose_for_view(vi, rp);
+      for (int k = 0; k < 3; k++) rp.bg[k] = bg[k];
       rp.sh_degree = cfg.sh_warmup_every > 0 ? std::min<int>(model.degree, (int)(step / cfg.sh_warmup_every)) : model.degree;
       rp.feat = normals_active ? FeatureMode::Normals : FeatureMode::None;
       rp.bwd_info = true;
@@ -239,7 +240,7 @@ int train_main(const Config& cfg) {
       const bool hollow_active = ph.hollow && step >= std::max(cfg.hollow_start_iter, 1u);
       if (hollow_active) {
         mesh.rasterize(rp.cam, view.W, view.H, (int)cfg.hollow_dilate, stream);
-        rp.hollow_z = mesh.depth; rp.hollow_margin = cfg.hollow_margin; rp.hollow_lam = cfg.hollow_weight / ((float)view.W * (float)view.H);
+        rp.hollow_z = mesh.depth; rp.hollow_margin = cfg.hollow_margin; rp.hollow_tau = cfg.hollow_tau; rp.hollow_front_alpha = cfg.hollow_front_alpha; rp.hollow_push_tau = cfg.hollow_push_tau; rp.hollow_lam = cfg.hollow_weight / ((float)view.W * (float)view.H);
       }
       render_forward(ctx, model, rp, stream);
       isect_sum += ctx.num_isect; isect_max = std::max(isect_max, ctx.num_isect); steps_timed++;
@@ -271,7 +272,6 @@ int train_main(const Config& cfg) {
       op.noise_weight = op.lr_mean * cfg.mean_noise_weight; op.noise_clamp = median_scale;
       op.seed = (uint32_t)cfg.seed; op.step = step; op.sparse = cfg.sparse_adam || cfg.recipe == Recipe::Fast;
       optimizer_step(ctx, model, op, stream);
-      timer.mark("optim", stream);
       if (rig_learn) {
         rig.update(rig_view[vi], model, cfg.body_rig_lr, cfg.body_rig_smooth, cfg.body_rig_zero, cfg.body_rig_global_moment, stream);
         if (rig.adam_t == 1 || rig.adam_t % 5000 == 0) {
@@ -281,6 +281,7 @@ int train_main(const Config& cfg) {
           log_info("Body rig update %d (iter %u): mean |torque| %.3g over active joints; per-view rotations mean %.2f deg, max %.2f deg", rig.adam_t, step, rig.mean_abs_torque, 57.2958 * sum / std::max(c, 1), 57.2958 * mx);
         }
       }
+      timer.mark("optim", stream);
 
       // Refine.
       float progress = (float)step / (float)std::max(1u, ph_total);
@@ -291,8 +292,8 @@ int train_main(const Config& cfg) {
         rpar.split_at_screen_size = cfg.split_at_screen_size; rpar.opac_decay = cfg.opac_decay; rpar.seed = (uint32_t)cfg.seed;
         RefineStats rs = refine.run(model, ctx, rpar, stream);
         if (model.cap > (int)ctx.tile_count.count) ctx.setup(ctx.W, ctx.H, model.cap, stream);
-        bounds = refine.bounds; median_scale = bounds.median_size();
         if (have_rig) rig.bind(model, stream);  // new and moved splats take the binding of their nearest rig vertex
+        bounds = refine.bounds; median_scale = bounds.median_size();
         log_info("Refine iter %u, %d splats (pruned %d, split %d, grown %d).", step, model.n, rs.pruned, rs.split_oversized, rs.grown);
         timer.mark("refine", stream);
       }
@@ -351,11 +352,11 @@ int train_main(const Config& cfg) {
   // The pristine frames stay resident; each iteration warps them afresh (a warp of a warp would drift).
   std::vector<ViewGPU> aligned_views;
   DevBuf<uint32_t> warped;
-  std::vector<std::thread> debug_writers;
   DevBuf<float2> warp_fields;
-  if (cfg.align_iters > 0) {
+  std::vector<std::thread> debug_writers;
   if (cfg.align_warp != "frames" && cfg.align_warp != "render") fail("invalid --align-warp '%s' [possible values: frames, render]", cfg.align_warp.c_str());
   const bool warp_render = cfg.align_warp == "render";
+  if (cfg.align_iters > 0) {
     size_t n_px = 0, n_grid = 0; int n_align = 0;
     for (auto& v : gv.views) if (!v.masked) { n_px += (size_t)v.W * v.H; n_grid += (size_t)align_warp_dim(v.W) * align_warp_dim(v.H); n_align++; }
     aligned_views = gv.views;
@@ -386,8 +387,8 @@ int train_main(const Config& cfg) {
         RenderParams rp; rp.cam = CameraGPU::from(gv.cams[vi], pv.W, pv.H);
         rp.bg[0] = rp.bg[1] = rp.bg[2] = 0.5f;  // align.py's BACKGROUND: both sides flattened onto the same grey
         rp.sh_degree = model.degree; rp.feat = FeatureMode::None; rp.bwd_info = false;
-        if (pv.W != ctx.W || pv.H != ctx.H) ctx.setup(pv.W, pv.H, model.cap, stream);
         pose_for_view((int)vi, rp);
+        if (pv.W != ctx.W || pv.H != ctx.H) ctx.setup(pv.W, pv.H, model.cap, stream);
         render_forward(ctx, model, rp, stream);
         // The flow is always measured from the pristine frame to the model's own (undisplaced) render, so the field
         // never accumulates: a warp of a warp would drift.
@@ -435,8 +436,8 @@ int train_main(const Config& cfg) {
       Phase refit;
       refit.total = cfg.align_steps; refit.views = &aligned_views; refit.label = format("align %u/%u · ", it, cfg.align_iters);
       refit.hollow = hollow_on;  // a regulariser, not supervision: it stays on through the refits
-      double t = train_phase(refit);
       refit.rig_learn_from_start = true;
+      double t = train_phase(refit);
       log_info("Alignment %u/%u refit took %s (%.1f it/s)", it, cfg.align_iters, format_duration(t).c_str(), cfg.align_steps / std::max(t, 1e-9));
     }
     std::string traj; for (size_t i = 0; i < means.size(); i++) traj += (i ? " -> " : "") + format("%.2f", means[i]);
@@ -445,7 +446,6 @@ int train_main(const Config& cfg) {
   }
 
   do_export(total, true);
-  for (auto& t : debug_writers) t.join();
   if (have_rig) {
     auto om = rig.download_omega(stream);
     nlohmann::json views = nlohmann::json::array();
@@ -460,6 +460,7 @@ int train_main(const Config& cfg) {
     FILE* f = fopen(out.string().c_str(), "wb"); if (f) { fwrite(text.data(), 1, text.size(), f); fclose(f); }
     log_info("Body rig: per-view joint rotations after %d updates written to %s", rig.adam_t, out.string().c_str());
   }
+  for (auto& t : debug_writers) t.join();
   if (cfg.bench) {
     log_info("  intersections/step: avg %.0f, max %u", isect_sum / std::max(1u, steps_timed), isect_max);
     double sum = 0; for (auto& [n, ms] : timer.totals) sum += ms;
