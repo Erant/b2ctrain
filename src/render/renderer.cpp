@@ -32,7 +32,7 @@ struct RenderArgs {
   ConfidenceParams conf;
   Config ds_cfg;  // dataset options for --dataset
   int device = 0;
-  int sh_degree = 3;  // highest band to evaluate, clamped to the ply's degree
+  int sh_degree = -1;  // bands to evaluate; -1 = every band the ply carries
 };
 
 const char* HELP =
@@ -45,7 +45,7 @@ const char* HELP =
 "      --background <BACKGROUND>        Background color composited under the splat's accumulated alpha, as \"r,g,b\" in 0..1. Ignored with --confidence [default: 1.0,1.0,1.0]\n"
 "      --output-format <OUTPUT_FORMAT>  Image encoder (png only) [default: png]\n"
 "      --device <N>                     CUDA device [default: 0]\n"
-"      --sh-degree <N>                  Highest spherical-harmonic band to evaluate, 0..3; 0 renders the DC colour only. Clamped to the ply's own degree [default: 3]\n\n"
+"      --sh-degree <N>                  Highest spherical-harmonic band to evaluate, 0..3; 0 renders the DC colour only. Clamped to the ply's own degree [default: the ply's degree]\n\n"
 "Confidence options:\n"
 "      --confidence                     Gate every pixel by the per-splat multi-view confidence\n"
 "      --cull-color <CULL_COLOR>        Colour culled pixels resolve to and the compositing background [default: 0.5,0.5,0.5]\n"
@@ -151,7 +151,8 @@ int render_main(int argc, char** argv) {
   // The active degree the projection kernel evaluates up to (sh_eval stops
   // at `active`); the bands above it stay in the model and are simply not
   // summed, so a degree-3 ply rendered at --sh-degree 0 is its DC colour.
-  int sh_degree = std::min(a.sh_degree, model.degree);
+  int sh_degree = a.sh_degree < 0 ? model.degree : std::min(a.sh_degree, model.degree);
+  if (a.sh_degree > model.degree) log_warn("--sh-degree %d exceeds the ply's degree %d; rendering at %d", a.sh_degree, model.degree, model.degree);
   if (sh_degree != model.degree) log_info("Rendering with SH bands 0..%d of %d", sh_degree, model.degree);
   RenderCtx ctx; ctx.setup(W, H, model.cap, stream);
 
