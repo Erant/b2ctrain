@@ -471,6 +471,251 @@ Also noted while reading it: the diff is internally inconsistent (`render.h` def
 `cli.h` defaults it to 0.5f, so anything building RenderParams directly gets the push ungated), and its two halves are
 coupled — `--hollow-tau 0` with the rest of it measured 33.8 dB / deep 0.156, worse than either end.
 
+### A b2h3cli run end to end: refine, refit, rig (2026-09-10)
+
+b2ctrain was run on a **b2h3cli** run rather than a b2crunner bundle: `~/Projects/b2h3cli/runs/helical720-20260826-134012`
+(243 generated frames at 768x1344, a 720-degree helix of 2 loops at +-30 degrees elevation, 2.98 deg/frame, rmbg mattes,
+`points3D.txt` sampled off the SAM-3D-Body mesh). Its sibling `helical720-depth-20260826-134037` (the same path with
+`reference_mode: depth`) was tried first and is the dirtier of the two; both are recorded below. Artefacts, splats and
+the driver scripts: `out/b2h3/` (not in git).
+
+**The dataset loads as-is.** `07_colmap/` is already a b2ctrain dataset (cameras.txt/images.txt/points3D.txt + images/ +
+masks/); no conversion needed.
+
+**Driving b2crunner's steps outside its runner** (`out/b2h3/scripts/`): `colmap_io.py` converts a COLMAP text model to and
+from `body2colmap.Camera` (the inverse of `coordinates.world_to_colmap_camera`), and the steps are instantiated directly with
+`Step.resolve_params({...})`. `refine_cameras` runs in b2crunner's venv; the body steps need torch and `sam_3d_body`, so they
+run in `~/Projects/sam-3d-body/.venv` with b2crunner on PYTHONPATH. Two host details: the local COLMAP needs
+`LD_LIBRARY_PATH=/usr/local/lib64:<a cu12 nvidia/cudnn/lib>` or ALIKED aborts on a missing `libcudnn.so.9`, and
+`tools/export.py` (what b2h3cli's fit stage shells out to) **drops `hand_pose_params`, `scale_params` and `expr_params`**,
+which `refit_body_to_splat`'s MHR replay needs. Re-running the estimator on the same photograph with the STORED `bbox` and
+`focal_length` (so neither the detector nor the FOV estimator runs, and the crop is identical) reproduces the fit to
+**0.0006 mm** and yields the full parameter set — `refit_params2.py`.
+
+**Camera refinement is worth as much here as it is in b2crunner, and its centre-shift gate is dataset-shaped.**
+
+| | mesh run | depth run |
+|---|---|---|
+| reprojection error, given -> refined | 1.717 -> 1.700 px | 1.709 -> 1.682 px |
+| BA scale inflation removed (trap 1) | +29.2% | +3.2% |
+| common-mode rotation removed (trap 4) | 0.63 deg | 1.67 deg |
+| mean centre shift | 2.31% of radius — **accepted** | 4.87% — **refused** (gate 3%) |
+| PSNR, given -> refined | 33.688 -> **34.086** | 32.605 -> **33.125** |
+| worst view | 26.58 -> 29.15 | 25.87 -> 26.75 |
+
+On the depth run the step refused its own solve and published the given poses. The correction it refused was smooth, not
+noise: per-frame displacement varied from 4 to 29 cm along the trajectory with a lag-1 correlation of the displacement
+vector of **0.996**. Reconstructing what the step would have published (its own `_align_to` + `_remove_common_mode`,
+`publish_refined.py`) and training on it gained +0.52 dB — the same size of gain that justified the step. So
+`max_centre_shift: 0.03`, calibrated on an 81-frame planar orbit, is too tight for a 243-frame 720-degree helix whose
+generated video drifts more; the honest fix is to raise it for helical runs, not to distrust the solve. Exhaustive
+ALIKED/LightGlue matching of 243 frames is 16091 verified pairs and ~25 min on the 4070 Ti; the whole step is ~30 min.
+
+**The refit moves much further than it does in b2crunner** — the generated video starts the subject at its own
+orientation, so the root yaw is a per-run constant:
+
+| | mesh run | depth run | b2crunner reference |
+|---|---|---|---|
+| root yaw delta | **+23.9 deg** | **-25.1 deg** | ~3 deg |
+| surface -> body median | 4.75 -> **2.52 cm** | 4.11 -> 3.02 | 1.33 -> 0.73 |
+| p90 | 11.6 -> 7.05 | 11.6 -> 8.8 | - |
+| body -> surface median | 0.99 -> 0.69 cm | 0.74 -> 0.72 | - |
+| inside by > 5 mm | 20% -> 15% | 17% -> 16% | 24.7% -> 12.9% |
+| mesh vertices inside the frame matte | - | 80.6% -> **88.2%** | - |
+
+The two runs' yaws have OPPOSITE signs from the same `body.npz`, which is the point: each H3 generation places the subject
+where it likes and the refit absorbs it. The residual is larger than b2crunner's because the subject wears baggy cargo
+trousers and a loose bomber jacket — 40% of surface points sit more than 3 cm outside the body whatever the fit does.
+Because the per-view rig excludes the root chain, a 24-degree canonical yaw never becomes a per-view rotation.
+
+**Results, mesh run** (30k iters, `--match-alpha-weight 0.5 --normalize-masked-loss --export-evidence`, hollow 0.5 at
+3 cm against the refit mesh, rig = production settings over all 243 views; 4070 Ti):
+
+| run | wall | PSNR | SSIM | splats | mass > 1.5x body radius | behind (probe, 3 cm) | s1 novel body / head / hands |
+|---|---|---|---|---|---|---|---|
+| base_given | 8m58s* | 33.688 | 0.9478 | 1.20M | 29.2% | - | - |
+| base_refined | 3m54s | **34.086** | **0.9521** | 1.13M | 17.4% | 0.0403 | 26.11 / 27.81 / 41.42 |
+| hollow | 3m56s | 33.224 | 0.9477 | 1.26M | **1.2%** | 0.0019 | 25.67 / 27.74 / 40.26 |
+| hollow_rig | 3m55s | 24.875+ | 0.7984 | 1.16M | 8.0% | 0.0014 | 25.90 / **28.21** / 41.50 |
+| hollow_rig_align | 3m54s | 24.186+ | 0.7843 | 1.16M | 5.2% | **0.0012** | **26.31** / **28.21** / **41.70** |
+
+\* contended with the COLMAP job. + canonical export against per-view poses — not the metric for a rig run (STATUS,
+"The rig at the INTERMEDIATE stage"): here every one of the 243 views is rigged, so the drop is the full effect.
+The learned rotations are textbook: mean 0.66 deg, max 5.65, |mean over views| 0.205 — against the 0.74 / 5.7 / 0.23 measured
+at stage 2. `hollow_rig_align` is the best deliverable: equal or better sharpness than the unregularised baseline in every
+region, 21x less weight behind the body, a third of its floaters.
+
+**Floaters, and why they are not the refinement.** A viewer render of the depth run showed the subject buried in spiky
+sheets. Measured over the model (count and `alpha * scale^2` beyond a radius about the body centre, `floaters.py`), the
+un-refined baseline is the WORST and every later step improves it:
+
+| depth run | splats > 1.5R | > 3R | mass > 1.5R |
+|---|---|---|---|
+| base_given | 17,614 | 1,070 | 94.0% |
+| base_refined | 11,520 | 11 | 64.1% |
+| hollow | 2,318 | 0 | 7.5% |
+
+The mesh run has **nothing at all beyond 3R** in any variant. The worst offenders are a handful of enormous splats: on the
+depth run 39 splats beyond 2.5 m carried 27.8% of the visible mass (median scale 14 cm, alpha 0.76) and 1,215 more sat at or
+outside the 1.87 m camera ring. Their in-mask evidence fraction is **1.000** — they are not background junk but
+depth-ambiguous splats projecting inside the silhouette, supported by ~4 effective views out of 243 (model median 55).
+Cutting at the camera-ring radius costs **0.01 dB** (33.125 -> 33.115) and removes 47% of the visible mass; cutting at 1.2 m
+costs 0.21 dB and is too aggressive (`prune.py`). What survives that cut is a "ceiling" above the head and a "floor" below the
+feet, inside the ring: those DO draw at the training cameras (a bounding-box cut costs 0.5-0.95 dB, `prune_box.py`) because they
+sit behind the subject, occluded where they were trained and revealed by parallax in between. `render --confidence` is what
+b2crunner ships against them and it clears most of them here while leaving the subject intact (`out/b2h3/panels/`). Note that a
+sharpness metric taken over a crop box is inflated by them — measure inside the projected body region instead (`sharp2.py`),
+or the dirtiest run wins.
+
+**Against brush, on this dataset, b2ctrain floats LESS.** The b2h3cli run ships `07_colmap_exports/export_05000.ply`, a
+brush export with no floaters at all, which looked like a trainer bug here. It is not: that export is 116k splats from a
+different (lighter) recipe stopped at 5k, and at 5k nothing has floaters yet. Matched, on `07_colmap` with b2crunner's argv:
+
+| | 5k | 30k |
+|---|---|---|
+| brush | 0 beyond 1.5R | **85,645 beyond 1.5R, 11,874 beyond 3R, 98.6% of mass**; PSNR 33.309 / SSIM 0.9420 |
+| b2ctrain | 1 beyond 1.5R (3 on a reseed) | 5,436 beyond 1.5R, **0 beyond 3R**, 29.2%; PSNR 33.688 / SSIM 0.9478 |
+
+At 4.2 m the brush model renders PURE BLACK — the camera sits behind an opaque shell of its own junk — while b2ctrain's
+shows the subject. On-ring novel views are comparable between the two (`out/b2h3/panels/`). brush at 4.8k under this argv
+already has 288k splats against the shipped export's 116k, which is how one can tell the recipes differ.
+
+**When the floaters appear: after growth stops.** Splat count saturates by 15k (`growth_stop_iter` 15000) and the junk keeps
+accumulating for the remaining 15k as unsupervised splats drift outward and inflate (b2ctrain, `07_colmap`, exports every 5k):
+
+| iter | splats | > 1.5R | > 3R | mass > 1.5R | PSNR | SSIM |
+|---|---|---|---|---|---|---|
+| 5000 | 320k | 3 | 0 | 1.2% | 26.547 | 0.8090 |
+| 10000 | 777k | 186 | 0 | 12.3% | 28.648 | 0.8848 |
+| 15000 | 1.19M | 1,487 | 0 | 25.5% | 31.843 | 0.9292 |
+| 20000 | 1.19M | 3,466 | 0 | 36.0% | 32.856 | 0.9397 |
+| 25000 | 1.20M | 5,940 | 2 | 46.5% | 33.407 | 0.9452 |
+| 30000 | 1.20M | 8,430 | 699 | 91.3% | 33.720 | 0.9480 |
+
+Stopping early is NOT free — PSNR is still climbing at 30k (25k costs 0.31 dB for half the floater mass). The cheap levers are
+the ones already measured: the camera-ring prune (0.01 dB), the hollow loss (1.2% of mass left at 30k) and
+`render --confidence`.
+
+### The face per view, and the anchor's eyes injected (2026-09-11)
+
+The body rig poses the arms per view; the face got nothing, and the eyes of the helical frames are the diffusion's
+invention per frame (three consecutive frames of F3 show three eye states: half closed, open looking sideways, open
+with makeup; pass 2 re-denoises even the reinjected anchor frame). Nothing multi-view recovers that, so the plan was
+(a) fit the MHR head per view — neck/head rotations plus the 72 expression blendshapes SAM-3D-Body leaves at zero —
+and hand the trainer the per-view head geometry the way the rig hands it the arms, and (b) build eyeballs from the
+MHR eye joints, texture them from the anchor photograph, and paste them into every frame through that frame's fitted
+lids. All on the MHR skeleton (user's call: keep it unified; uniface was surveyed and adds nothing the MHR route needs).
+
+What was learned building it (scratch tooling in `out/face/`, details in the session memory):
+
+* The pipeline's face landmarker (BlazeFace short-range on the whole 1080x1920 frame) misses the ~80 px face in 63 of
+  81 helical frames and hallucinates faces on the trousers in 4 of them. Cropping from the **projected MHR head**
+  (roll from the projected head-up axis) needs no detector and landmarks 35 of 81 — every view facing the camera to
+  ~85 deg; the rest are back views or hair-covered profiles.
+* Per-view fit, all views in one batched Adam run: landmark rms 6.4 -> 4.6 (pose) -> **2.1 px** (pose + expression).
+  The six neck/head rotations counter-rotate into a lateral head shift when unregularised (frame 67: 61 mm); an L2 of
+  50 on them removes that at zero residual cost. The fitted lids follow the frames' half-closed eyes (frame 73).
+* MHR has eye joints (122/124, gaze children 123/125) but no eyeballs; the lid ring sits 15.4-20.6 mm from the joint.
+  The eyeball is a 15.5 mm sphere at the joint, clipped **in 3D** to the fitted lid contour's cylinder (a 2D polygon
+  leaks at grazing angles), depth-tested at 1 mm against the head mesh with the eye-disk faces removed and back-face
+  culling off, and skipped when less than half its lid polygon is visible (the far eye peeking past the model's
+  narrower nose). Texture: the anchor through a PnP camera refined with expression (1.4 px); the ~30% of the iris under
+  the anchor's upper lid is filled by a radial colour profile around the gaze axis; gaze fixed relative to the head.
+* Trainer: **rig v3** = the v2 rig plus a per-view displacement of every rig vertex (magic `B2CRIG3`), added to a bound
+  point before the LBS blend so it rides the learned rotations; `tests/tests.cpp` covers it. Frames without a fit get
+  the deltas interpolated across gaps of <= 4 frames and (first runs) faded to canonical over 3 — later held, see below.
+
+Stage-5 argv of the earlier rig runs, F3 bundle, `rig_noroot` (all joints but the root chain), HEAD binary:
+
+| run | frames | rig | PSNR (21 train views) | head s1 novel / train | eye MAE vs the eye model, 11 novel views |
+|---|---|---|---|---|---|
+| base | original | v2 | 28.757 | 27.98 / 28.18 | 66.6 |
+| delta | original | v3, pose+expr | 28.615 | 27.59 / 27.82 | 59.4 |
+| eyes | eyes pasted (32 views) | v3, pose+expr | 28.631 | 27.61 / 27.81 | **52.5** |
+| expr_eyes | eyes pasted | v3, expression only | 28.679 | 27.92 / 28.40 | 56.8 |
+| v2_eyes | eyes pasted | v2 | 28.791 | **28.28 / 28.67** | 61.2 |
+
+(eye MAE: mean |render - eye model| inside the eye model's own mask, rendered at the novel cameras from the canonical
+head; a coarse number, the render is soft against a crisp model, but it orders the runs the way the panels do.)
+
+What the panels (`out/face/panel2.jpg`) show: base has smeared dark slits for eyes at every novel view; with the eyes
+pasted and the full v3 deltas there is an eyeball with sclera and a dark iris at every novel view, including the one
+between frames 73/74 where the frames' lids were half closed — the deltas explain those lids per view, so the canonical
+opening converges to the anchor's; without deltas (`v2_eyes`) that view stays a dark slit. The deltas cost head
+sharpness (-1.4% s1) and the cost sits in the rigid part: expression-only deltas are s1-neutral and keep most of the
+eye gain. Face deltas alone (`delta`) do nothing for sharpness — the alignment loop and the learned rig already absorb
+the per-frame head wobble in 2D — they are the enabler for the eyes, not a lever on their own.
+
+**Second subject (`~/Projects/facerefine`, run 18, body replayed from the ply's MHR record) and the lever sweep
+(2026-09-11, later).** On this subject full deltas stabilised the face across views but softened every single view,
+expression-only deltas were the crisp ones but swam like the baseline — a toss-up, so a metric for the swim was built
+(`swim.py`: landmark the render at 52 dense novel cameras, measure the rendered landmarks against the projected
+canonical head; the std of the per-view shift is the swim) and the rigid part was taken apart. All with the eyes
+pasted; s1 split into face (expression-moved vertices, `mov > 0.5`) and the rest of the head:
+
+| deltas | face s1 novel | hair+head s1 | swim px | eye MAE |
+|---|---|---|---|---|
+| none (base, v2 rig) | 30.44 | 40.29 | 5.02 | 51.3 |
+| expression only | 30.87 | 40.75 | 4.99 | 43.1 |
+| full (neck+head 6 DOF + expr) | 29.48 | 38.39 | 3.44 | 41.8 |
+| head-only rotation (3 DOF) | 29.81 | 38.81 | 3.09 | 41.7 |
+| 6 DOF, temporal smoothing | 29.51 | 39.27 | 3.39 | 40.2 |
+| 6 DOF, visibility-weighted landmarks | 29.64 | 38.95 | 3.53 | 38.9 |
+| 6 DOF, unfitted views hold the neighbour instead of fading | 29.10 | 38.51 | 2.39 | 43.6 |
+| 6 DOF, rigid part only within 45 / 60 deg of frontal | — | 39.60 / 38.98 | 4.22 / 3.58 | 44.5 / 46.4 |
+| **6 DOF + hold, deltas on the FACE only (mov > 0.5, 3 cm fade)** | **30.48** | **40.13** | **1.58** | **35.5** |
+| head-only + hold, face only | 30.57 | 39.69 | 1.87 | 37.9 |
+
+The same trio without the alignment loop keeps the ordering (rigid deltas face 26.7 vs 27.7), so the blur is not an
+alignment interaction. Every variant of the rigid fit blurred the same amount — the blur is not fit noise either. It
+is the hair: the deltas moved every head vertex, and the frames' hair does not follow the face fit (nor do the back
+views, which pin the hair canonical), so the hair was supervised in two places and blurred, and the face with it.
+Restricting the deltas to the face core (`FACE_ONLY`, `FACE_MOV=0.5`, fade over 3 cm) keeps the hair with the learned
+rig: sharpness at the expression-only level, the swim 3x lower than any other variant, the best eyes. The first
+"face-only" attempt used `mov > 0.01`, which is the whole head (the expression basis touches every head vertex by a
+hair) — an error that hid this for two runs. Panels `out/facerefine/panel_head2.jpg`.
+
+Also seen on this subject: frames 67-70 have the hand in front of the face and the head mesh cannot know, so one
+frame got an eye pasted on the hand; a pixel gate (something darker than the skin inside the lid polygon) catches
+two of the four. Occlusion from the per-view posed body is the proper fix.
+
+**Four subjects (2026-09-11, evening).** F3 and facerefine above, plus bundles 22 (a problematic face: the frames
+deviate 12 px rms from the canonical before the fit, the baseline's eyes are blue smears) and 19 (a good face, the
+control that must not degrade). All from the ply's MHR record with `run_subject.sh`. base = v2 rig, original frames;
+hold = full 6-DOF+expression deltas, unfitted views hold their neighbour; face05_hold = the same restricted to the face.
+
+| subject | run | face s1 | hair s1 | swim px | eye MAE |
+|---|---|---|---|---|---|
+| F3 | base / hold* / face05_hold | 28.95 / 28.67 / 28.22 | 22.90 / 22.41 / 22.42 | 2.47 / 2.01 / 2.02 | 66.6 / 52.5 / 55.7 |
+| facerefine | base / hold / face05_hold | 30.44 / 29.10 / 30.48 | 40.29 / 38.51 / 40.13 | 5.02 / 2.39 / 1.58 | 51.3 / 43.6 / 35.5 |
+| 22 | base / hold / face05_hold | 21.48 / 21.52 / 21.94 | 19.29 / 18.39 / 19.22 | 3.03 / 2.90 / 3.09 | 65.6 / 27.8 / 28.3 |
+| 19 | base / hold / face05_hold | 35.32 / 34.96 / 34.96 | 25.76 / 25.00 / 26.42 | 1.79 / 1.93 / 2.13 | 81.5 / 41.8 / 51.5 |
+
+(*F3's "hold" column is the `eyes` run, full deltas with fade.) The eyes are the headline on every subject: base eye
+error 51-82, with deltas 28-56, and the panels (`out/s22/panel_head.jpg`, `out/s19/panel_head.jpg`) show why — 22's
+blue smears and 19's closed slits both become open eyes with an iris. Face sharpness stays within +-2.5% of base on
+every subject in every config (the metric's resolution); the one systematic effect is the hair, which full deltas
+cost 2-5% on three of four subjects and face-only deltas leave alone (19: +2.6%). Swim: face-only is a large win
+where the subject swims (facerefine 5.0 -> 1.6), neutral where it does not (19, F3). Full deltas give somewhat
+better eyes on 19 (42 vs 52). **Default: face-only + hold** (`FACE_ONLY=3 FACE_MOV=0.5 HOLD=1`, 6-DOF fit with the
+rotation prior) — it never costs hair or face sharpness; full deltas remain the option when a subject's eyes need it.
+
+**Integrated (2026-09-11, later).** Trainer: rig v3 is commit e8f43ac (`B2CRIG3` named in `--body-rig`'s help, which
+is how b2crunner's brush step and doctor tell a v3-capable binary). b2crunner dd899c8: four steps in stage 6 of
+`fast_helical_native.yaml` on the `face_refine` setting (default on, needs `refit_body`) — `detect_face_views`,
+`fit_head_per_view` (sam3dbody env), `paste_eyes`, `build_face_rig` (face-only + hold, `pose_prior` 50) — see its
+docs/face-refine.md; `pipeline/body_rig.py` writes/reads v3; Dockerfile pinned at e8f43ac. Driven standalone on the
+facerefine subject the steps reproduce the scratch run above: 37 landmarked (the scratch's roll normalisation had its
+sign inverted and doubled the roll instead of removing it — MediaPipe coped; fixed), 34 fitted at 8.4 -> 4.6 -> 2.6 px,
+32 frames pasted, and trained with the same argv (`out/facerefine/integrated`): face s1 30.48 / hair 40.04 / swim
+1.65 px / eye MAE 38.2 against face05_hold's 30.48 / 40.13 / 1.58 / 35.5 (base 30.44 / 40.29 / 5.02 / 51.3); panel
+`out/facerefine/panel_integrated.jpg`. No image built yet.
+
+Open: the eye region gets no loss-weight boost yet (`weights/` sidecars exist for that); gaze is fixed to the anchor's;
+closed-eye detection is not attempted; an eye pasted onto a dark hand in front of the face survives the darkness gate
+(occlusion from the posed body is the proper fix); the texture comes from a 90 px-wide face (iris ~9 px), the same
+scale as the frames' eyes, so it is not the resolution bottleneck.
+
 ## What's left
 
 - **Commit the b2crunner side.** Its working tree (`~/Projects/b2crunner`) has uncommitted changes from this work in
