@@ -219,6 +219,33 @@ static int test_deform() {
   bool ok2 = std::abs(om2[1].z - (0.3f + 1e-3f)) < 1e-5f && std::abs(om2[1].x) < 1e-6f && std::abs(om2[1].y) < 1e-6f && om2[0].z == 0.f && om2[2].z == 0.f;
   printf("deform torque: omega_z %.6f (expected %.6f), inactive joints untouched %s\n", om2[1].z, 0.3f + 1e-3f, ok2 ? "yes" : "NO");
   if (!ok2) fails++;
+  // v3: the same rig with a per-view displacement of the bound vertex, (0, 0.5, 0) for vertex 0. It is added BEFORE the
+  // blend: the bound point becomes (0, 3, 0), r = (0, 2, 0) about the pivot -> (-2, 1, 0) at 90 deg.
+  {
+    const char* path3 = "/tmp/b2c_test_rig3.bin";
+    FILE* f = fopen(path3, "wb");
+    fwrite("B2CRIG3\0", 1, 8, f);
+    int32_t hdr[6] = {2, 3, 1, 4, 64, 1}; fwrite(hdr, sizeof(hdr), 1, f);
+    float verts[6] = {0.f, 2.5f, 0.f, 0.f, 0.5f, 0.f}; fwrite(verts, sizeof(verts), 1, f);
+    int32_t vj[8] = {2, 0, 0, 0, 0, 0, 0, 0}; fwrite(vj, sizeof(vj), 1, f);
+    float vw[8] = {1.f, 0.f, 0.f, 0.f, 1.f, 0.f, 0.f, 0.f}; fwrite(vw, sizeof(vw), 1, f);
+    char name[64] = "view0.png"; fwrite(name, 64, 1, f);
+    int32_t parents[3] = {-1, 0, 1}; fwrite(parents, sizeof(parents), 1, f);
+    float jpos[9] = {0.f, 0.f, 0.f, 0.f, 1.f, 0.f, 0.f, 2.f, 0.f}; fwrite(jpos, sizeof(jpos), 1, f);
+    int32_t active[1] = {1}; fwrite(active, sizeof(active), 1, f);
+    float delta[6] = {0.f, 0.5f, 0.f, 0.f, 0.f, 0.f}; fwrite(delta, sizeof(delta), 1, f);
+    fclose(f);
+    BodyRig rig3;
+    if (!rig3.load(path3) || !rig3.has_delta) { printf("deform v3: cannot load the test rig\n"); return fails + 1; }
+    rig3.bind(m, 0);
+    std::vector<float3> om3(3, make_float3(0.f, 0.f, 0.f)); om3[1] = make_float3(0.f, 0.f, half_pi);
+    rig3.omega.upload(om3);
+    rig3.pose(0, m, 0);
+    auto pv3 = rig3.pos_view.download(2);
+    bool ok3 = std::abs(pv3[0].x + 2.f) < 1e-4f && std::abs(pv3[0].y - 1.f) < 1e-4f && std::abs(pv3[0].z) < 1e-4f && std::abs(pv3[1].y - 0.5f) < 1e-6f;
+    printf("deform v3 delta: bound point -> (%.3f, %.3f, %.3f) %s\n", pv3[0].x, pv3[0].y, pv3[0].z, ok3 ? "ok" : "WRONG");
+    if (!ok3) fails++;
+  }
   return fails;
 }
 

@@ -11,7 +11,7 @@ constexpr int BIND_TILE = 1024;
 constexpr int NJ_MAX = 128;
 
 __global__ void bind_kernel(int n, const float* __restrict__ pos, int stride, int nv, const float3* __restrict__ verts,
-                            const int4* __restrict__ vj, const float4* __restrict__ vw, int4* __restrict__ bj, float4* __restrict__ bw) {
+                            const int4* __restrict__ vj, const float4* __restrict__ vw, int4* __restrict__ bj, float4* __restrict__ bw, int* __restrict__ bv) {
   __shared__ float3 sv[BIND_TILE];
   int i = blockIdx.x * blockDim.x + threadIdx.x;
   float3 p = make_float3(0.f, 0.f, 0.f);
@@ -30,7 +30,7 @@ __global__ void bind_kernel(int n, const float* __restrict__ pos, int stride, in
       }
     }
   }
-  if (i < n) { bj[i] = vj[bi]; bw[i] = vw[bi]; }
+  if (i < n) { bj[i] = vj[bi]; bw[i] = vw[bi]; bv[i] = bi; }
 }
 
 __device__ __forceinline__ float3 blend_apply(float3 x, int4 j, float4 w, const float* __restrict__ xf) {
@@ -47,17 +47,23 @@ __device__ __forceinline__ float3 blend_apply(float3 x, int4 j, float4 w, const 
   return out;
 }
 
-__global__ void pose4_kernel(int n, const float4* __restrict__ pos, const int4* __restrict__ bj, const float4* __restrict__ bw, const float* __restrict__ xf, float4* __restrict__ out) {
+// `delta` (v3 rigs, else nullptr): the view's displacement of the bound rig vertex, added before the blend.
+__global__ void pose4_kernel(int n, const float4* __restrict__ pos, const int4* __restrict__ bj, const float4* __restrict__ bw, const int* __restrict__ bv,
+                             const float3* __restrict__ delta, const float* __restrict__ xf, float4* __restrict__ out) {
   int i = blockIdx.x * blockDim.x + threadIdx.x;
   if (i >= n) return;
-  float4 p = pos[i];
-  float3 q = blend_apply(make_float3(p.x, p.y, p.z), bj[i], bw[i], xf);
+  float4 p = pos[i]; float3 x = make_float3(p.x, p.y, p.z);
+  if (delta) { float3 d = delta[bv[i]]; x.x += d.x; x.y += d.y; x.z += d.z; }
+  float3 q = blend_apply(x, bj[i], bw[i], xf);
   out[i] = make_float4(q.x, q.y, q.z, p.w);
 }
-__global__ void pose3_kernel(int n, const float3* __restrict__ pos, const int4* __restrict__ bj, const float4* __restrict__ bw, const float* __restrict__ xf, float3* __restrict__ out) {
+__global__ void pose3_kernel(int n, const float3* __restrict__ pos, const int4* __restrict__ bj, const float4* __restrict__ bw, const int* __restrict__ bv,
+                             const float3* __restrict__ delta, const float* __restrict__ xf, float3* __restrict__ out) {
   int i = blockIdx.x * blockDim.x + threadIdx.x;
   if (i >= n) return;
-  out[i] = blend_apply(pos[i], bj[i], bw[i], xf);
+  float3 x = pos[i];
+  if (delta) { float3 d = delta[bv[i]]; x.x += d.x; x.y += d.y; x.z += d.z; }
+  out[i] = blend_apply(x, bj[i], bw[i], xf);
 }
 
 // Rodrigues: rotation matrix (row-major) of the axis-angle vector w.
@@ -169,7 +175,8 @@ bool BodyRig::load(const std::string& path) {
   if (!f) return false;
   auto need = [&](void* dst, size_t bytes) { if (fread(dst, 1, bytes, f) != bytes) { fclose(f); throw std::runtime_error("body rig '" + path + "' is truncated"); } };
   char magic[8]; need(magic, 8);
-  if (memcmp(magic, "B2CRIG2", 7) != 0) { fclose(f); throw std::runtime_error("'" + path + "' is not a b2ctrain body rig v2 (bad magic)"); }
+  const bool v3 = memcmp(magic, "B2CRIG3", 7) == 0;
+  if (!v3 && memcmp(magic, "B2CRIG2", 7) != 0) { fclose(f); throw std::runtime_error("'" + path + "' is not a b2ctrain body rig v2/v3 (bad magic)"); }
   int32_t hdr[6]; need(hdr, sizeof(hdr));
   nv = hdr[0]; nj = hdr[1]; nviews = hdr[2]; n_active = hdr[5];
   if (hdr[3] != 4 || hdr[4] != 64 || nv <= 0 || nj <= 0 || nj > NJ_MAX || nviews <= 0 || n_active <= 0) { fclose(f); throw std::runtime_error("body rig '" + path + "': unsupported layout"); }
@@ -179,6 +186,8 @@ bool BodyRig::load(const std::string& path) {
   parents_h.resize(nj); need(parents_h.data(), (size_t)nj * sizeof(int32_t));
   std::vector<float3> jp(nj); need(jp.data(), (size_t)nj * sizeof(float3));
   std::vector<int32_t> act(n_active); need(act.data(), (size_t)n_active * sizeof(int32_t));
+  std::vector<float3> dl;
+  if (v3) { dl.resize((size_t)nviews * nv); need(dl.data(), dl.size() * sizeof(float3)); }
   fclose(f);
   for (auto& jj : j) { const int js[4] = {jj.x, jj.y, jj.z, jj.w}; for (int k = 0; k < 4; k++) if (js[k] < 0 || js[k] >= nj) throw std::runtime_error("body rig '" + path + "': joint index out of range"); }
   for (int k = 0; k < nj; k++) if (parents_h[k] >= k) throw std::runtime_error("body rig '" + path + "': joints are not in parent-first order");
@@ -192,6 +201,7 @@ bool BodyRig::load(const std::string& path) {
   }
   names.clear(); for (int i = 0; i < nviews; i++) { std::string s(nm.data() + (size_t)i * 64, 64); s = s.c_str(); names.push_back(s); }
   verts.upload(v); vj.upload(j); vw.upload(w); parents.upload(parents_h); active.upload(active_h); anc.upload(anc_h); jpos0.upload(jp);
+  has_delta = v3; if (v3) delta.upload(dl);
   xf.reserve((size_t)nviews * nj * 12); pivots.reserve(nj); torque.reserve(nj);
   omega.reserve((size_t)nviews * nj); m_om.reserve((size_t)nviews * nj); v_om.reserve((size_t)nviews * nj);
   omega.zero(); m_om.zero(); v_om.zero();
@@ -204,16 +214,16 @@ int BodyRig::view_index(const std::string& name) const {
   return -1;
 }
 
-void BodyRig::bind_points(const float* pos, int n, int stride, DevBuf<int4>& bj, DevBuf<float4>& bw, cudaStream_t stream) const {
+void BodyRig::bind_points(const float* pos, int n, int stride, DevBuf<int4>& bj, DevBuf<float4>& bw, DevBuf<int>& bv, cudaStream_t stream) const {
   if (n <= 0) return;
-  if (bj.count < (size_t)n) bj.reserve(n); if (bw.count < (size_t)n) bw.reserve(n);
-  bind_kernel<<<div_up(n, 256), 256, 0, stream>>>(n, pos, stride, nv, verts, vj, vw, bj, bw);
+  if (bj.count < (size_t)n) bj.reserve(n); if (bw.count < (size_t)n) bw.reserve(n); if (bv.count < (size_t)n) bv.reserve(n);
+  bind_kernel<<<div_up(n, 256), 256, 0, stream>>>(n, pos, stride, nv, verts, vj, vw, bj, bw, bv);
   CUDA_KERNEL_CHECK();
 }
 
 void BodyRig::bind(const Model& m, cudaStream_t stream) {
-  if (bind_j.count < (size_t)m.cap) { bind_j.reserve(m.cap); bind_w.reserve(m.cap); pos_view.reserve(m.cap); g_pos.reserve(m.cap); g_pos.zero(stream); }
-  bind_points(reinterpret_cast<const float*>(m.pos_op.ptr), m.n, 4, bind_j, bind_w, stream);
+  if (bind_j.count < (size_t)m.cap) { bind_j.reserve(m.cap); bind_w.reserve(m.cap); bind_v.reserve(m.cap); pos_view.reserve(m.cap); g_pos.reserve(m.cap); g_pos.zero(stream); }
+  bind_points(reinterpret_cast<const float*>(m.pos_op.ptr), m.n, 4, bind_j, bind_w, bind_v, stream);
   bound_n = m.n;
 }
 
@@ -227,13 +237,13 @@ void BodyRig::pose(int v, const Model& m, cudaStream_t stream) {
   fk(v, stream);
   if (m.n > bound_n) throw std::runtime_error("body rig: the model grew since the last bind()");
   if (m.n == 0) return;
-  pose4_kernel<<<div_up(m.n, 256), 256, 0, stream>>>(m.n, m.pos_op, bind_j, bind_w, xf.ptr + (size_t)v * nj * 12, pos_view);
+  pose4_kernel<<<div_up(m.n, 256), 256, 0, stream>>>(m.n, m.pos_op, bind_j, bind_w, bind_v, has_delta ? delta.ptr + (size_t)v * nv : nullptr, xf.ptr + (size_t)v * nj * 12, pos_view);
   CUDA_KERNEL_CHECK();
 }
 
-void BodyRig::pose_points(int v, const float3* src, const int4* bj, const float4* bw, int n, float3* dst, cudaStream_t stream) const {
+void BodyRig::pose_points(int v, const float3* src, const int4* bj, const float4* bw, const int* bv, int n, float3* dst, cudaStream_t stream) const {
   if (n <= 0) return;
-  pose3_kernel<<<div_up(n, 256), 256, 0, stream>>>(n, src, bj, bw, xf.ptr + (size_t)v * nj * 12, dst);
+  pose3_kernel<<<div_up(n, 256), 256, 0, stream>>>(n, src, bj, bw, bv, has_delta ? delta.ptr + (size_t)v * nv : nullptr, xf.ptr + (size_t)v * nj * 12, dst);
   CUDA_KERNEL_CHECK();
 }
 

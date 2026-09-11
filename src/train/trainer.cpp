@@ -148,7 +148,7 @@ int train_main(const Config& cfg) {
   // Articulated per-view deformation (gpu/deform.h).
   BodyRig rig; bool have_rig = false;
   std::vector<int> rig_view(ds.train.size(), -1);
-  DevBuf<float3> mesh_canon; DevBuf<int4> mesh_bj; DevBuf<float4> mesh_bw;
+  DevBuf<float3> mesh_canon; DevBuf<int4> mesh_bj; DevBuf<float4> mesh_bw; DevBuf<int> mesh_bv;
   if (!cfg.body_rig.empty()) {
     if (!rig.load(cfg.body_rig)) fail("--body-rig %s: cannot open", cfg.body_rig.c_str());
     int matched = 0;
@@ -159,15 +159,15 @@ int train_main(const Config& cfg) {
     if (have_mesh && mesh.nv > 0) {
       // The hollow proxy follows the body: its vertices are bound and posed the same way.
       mesh_canon.reserve(mesh.nv); CUDA_CHECK(cudaMemcpyAsync(mesh_canon.ptr, mesh.v.ptr, (size_t)mesh.nv * sizeof(float3), cudaMemcpyDeviceToDevice, stream));
-      rig.bind_points(reinterpret_cast<const float*>(mesh_canon.ptr), mesh.nv, 3, mesh_bj, mesh_bw, stream);
+      rig.bind_points(reinterpret_cast<const float*>(mesh_canon.ptr), mesh.nv, 3, mesh_bj, mesh_bw, mesh_bv, stream);
     }
     CUDA_CHECK(cudaStreamSynchronize(stream));
-    log_info("Body rig %s: %d joints, %d rig vertices, %d/%zu training views matched; splats render at their skinned per-view positions, the model stays canonical", cfg.body_rig.c_str(), rig.nj, rig.nv, matched, ds.train.size());
+    log_info("Body rig %s: %d joints, %d rig vertices, %d/%zu training views matched%s; splats render at their skinned per-view positions, the model stays canonical", cfg.body_rig.c_str(), rig.nj, rig.nv, matched, ds.train.size(), rig.has_delta ? ", with per-view vertex displacements (v3)" : "");
   }
   auto pose_for_view = [&](int vi, RenderParams& rp) {  // vi: training view index
     if (!have_rig || vi < 0 || rig_view[vi] < 0) return;
     rig.pose(rig_view[vi], model, stream); rp.pos_override = rig.pos_view;
-    if (have_mesh && mesh.nv > 0) rig.pose_points(rig_view[vi], mesh_canon, mesh_bj, mesh_bw, mesh.nv, mesh.v, stream);
+    if (have_mesh && mesh.nv > 0) rig.pose_points(rig_view[vi], mesh_canon, mesh_bj, mesh_bw, mesh_bv, mesh.nv, mesh.v, stream);
   };
 
   PinnedBuf<float> h_loss; h_loss.reserve(16);
