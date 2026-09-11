@@ -704,7 +704,7 @@ rotation prior) — it never costs hair or face sharpness; full deltas remain th
 is how b2crunner's brush step and doctor tell a v3-capable binary). b2crunner dd899c8: four steps in stage 6 of
 `fast_helical_native.yaml` on the `face_refine` setting (default on, needs `refit_body`) — `detect_face_views`,
 `fit_head_per_view` (sam3dbody env), `paste_eyes`, `build_face_rig` (face-only + hold, `pose_prior` 50) — see its
-docs/face-refine.md; `pipeline/body_rig.py` writes/reads v3; Dockerfile pinned at e8f43ac. Driven standalone on the
+docs/face-refine.md; `pipeline/body_rig.py` writes/reads v3; its Dockerfile pins b2ctrain at the main HEAD that follows this commit (the builder requires branch head == pin). Driven standalone on the
 facerefine subject the steps reproduce the scratch run above: 37 landmarked (the scratch's roll normalisation had its
 sign inverted and doubled the roll instead of removing it — MediaPipe coped; fixed), 34 fitted at 8.4 -> 4.6 -> 2.6 px,
 32 frames pasted, and trained with the same argv (`out/facerefine/integrated`): face s1 30.48 / hair 40.04 / swim
