@@ -12,6 +12,7 @@ cmake --build build
 ./build/b2c_tests                       # finite-difference gradient check against a double-precision CPU reference
 ./build/b2ctrain <dataset> --total-train-iters 30000 --export-path out --export-name export.ply --export-every 30000 --export-evidence
 ./build/b2ctrain render --splat out/export.ply --cameras cameras.json --output-dir renders --confidence --cull-color 0,0,0
+./build/b2ctrain render --splat out/export.ply --cameras cameras.json --output-dir renders --sh-degree 0   # DC colour only; bands above N are left out of the sum
 ```
 
 ## What it implements
