@@ -23,6 +23,21 @@ constexpr int EV_ACC = 8;
 static DevBuf<float> g_evidence;   // [n][EV_ACC]
 static DevBuf<float> g_view_acc;   // [n][3] per-view (w_in, err, w_all)
 
+// The label vote (--export-labels). A `labels/` sidecar gives each pixel a class id; a splat's vote for
+// class k is the sum over views and pixels labelled k of vis * (the pixel's weight in w_all), so it is
+// front-to-back and occlusion-aware -- a splat behind the hair contributes nothing to a front view's
+// vote -- and a floater whose weight lands on background pixels wins class 0. The winner's share of the
+// splat's total is the confidence. Measured on a b2crunner deliverable before this landed (81 views,
+// 332k splats, Sapiens2 Goliath labels, the same weights computed through a rasteriser's colour
+// gradient): 96% of the rendered weight agrees with its splat's winner, median confidence 0.99, and
+// rendering the winners back at the training cameras matches the 2D labels at 95.1% of the pixels
+// (mIoU 0.845) -- the disagreement sits on part boundaries and the silhouette. Voting from every third
+// view gave the same result; a projection-only vote (label under the splat centre, no occlusion) was
+// measurably worse, which is why this lives in the replay and not in a script.
+constexpr int LABEL_BINS = 32;     // Goliath has 29 classes; ids >= LABEL_BINS are ignored
+static DevBuf<float> g_labels;     // [n][LABEL_BINS]
+static bool g_labels_valid = false;
+
 namespace {
 
 __device__ __forceinline__ float gt_ch(uint32_t p, int c) { return (float)((p >> (8 * c)) & 0xffu) * (1.f / 255.f); }
@@ -119,6 +134,66 @@ __global__ void fold_view_kernel(int n, const float* __restrict__ acc, const flo
   }
 }
 
+// Forward replay per tile accumulating vis * k into the splat's bin for the pixel's class. Same walk as
+// evidence_kernel; a second pass rather than a template lane so the evidence kernel's register and
+// shared-memory budget is untouched. Shared atomics: labels are spatially coherent, so the lanes of a
+// tile row mostly hit one or two bins.
+__global__ void __launch_bounds__(RT_PX) label_vote_kernel(
+    const uint2* __restrict__ tile_ranges, const uint32_t* __restrict__ sorted_vals,
+    const float4* __restrict__ proj0, const float4* __restrict__ proj1, const uint32_t* __restrict__ last_idx,
+    const uint32_t* __restrict__ gt, const uint8_t* __restrict__ labels, const uint8_t* __restrict__ weights,
+    int W, int H, int tiles_x, bool masked_has_alpha, float* __restrict__ acc) {
+  __shared__ float4 s0[RT_PX], s1[RT_PX];
+  __shared__ uint32_t s_gid[RT_PX];
+  __shared__ float s_acc[RT_PX][LABEL_BINS];
+  const int tile = blockIdx.x;
+  const uint2 range = tile_ranges[tile];
+  if (range.y <= range.x) return;
+  const int tx = tile % tiles_x, ty = tile / tiles_x;
+  const int lx = threadIdx.x % RT_W, ly = threadIdx.x / RT_W;
+  const int px = tx * RT_W + lx, py = ty * RT_W + ly;
+  const bool inside = px < W && py < H;
+  const float pcx = px + 0.5f, pcy = py + 0.5f;
+  float k = 0.f; int bin = 0; uint32_t last = range.x;
+  if (inside) {
+    int pix = py * W + px;
+    float wp = weights ? weights[pix] * (1.f / 255.f) : 1.f;
+    k = (masked_has_alpha ? gt_ch(gt[pix], 3) : 1.f) * wp;
+    bin = labels[pix];
+    if (bin >= LABEL_BINS) k = 0.f;
+    last = last_idx[pix];
+  }
+  float T = 1.f; bool done = !inside || k == 0.f;
+  for (uint32_t start = range.x; start < range.y; start += RT_PX) {
+    if (__syncthreads_count(done) == RT_PX) break;
+    uint32_t remaining = min((uint32_t)RT_PX, range.y - start);
+    if (threadIdx.x < remaining) {
+      uint32_t gid = sorted_vals[start + threadIdx.x];
+      s_gid[threadIdx.x] = gid; s0[threadIdx.x] = proj0[gid]; s1[threadIdx.x] = proj1[gid];
+    }
+    for (int b = threadIdx.x; b < RT_PX * LABEL_BINS; b += RT_PX) (&s_acc[0][0])[b] = 0.f;
+    __syncthreads();
+    for (uint32_t t = 0; t < remaining; t++) {
+      if (!done && start + t < last) {
+        float4 a = s0[t]; float4 c = s1[t];
+        float dx = pcx - a.x, dy = pcy - a.y;
+        float sigma = 0.5f * (a.z * dx * dx + c.x * dy * dy) + a.w * dx * dy;
+        if (sigma >= 0.f && sigma <= c.w) {
+          float alpha = fminf(ALPHA_MAX, c.y * __expf(-sigma));
+          atomicAdd(&s_acc[t][bin], alpha * T * k);
+          T *= (1.f - alpha);
+        }
+      }
+    }
+    __syncthreads();
+    for (int b = threadIdx.x; b < (int)remaining * LABEL_BINS; b += RT_PX) {
+      float v = (&s_acc[0][0])[b];
+      if (v != 0.f) atomicAdd(acc + (size_t)s_gid[b / LABEL_BINS] * LABEL_BINS + (b % LABEL_BINS), v);
+    }
+    __syncthreads();
+  }
+}
+
 }  // namespace
 
 void compute_evidence(RenderCtx& ctx, const Model& m, const std::vector<ViewGPU>& views, const std::vector<Camera>& cams, const Config& cfg, cudaStream_t stream,
@@ -126,6 +201,8 @@ void compute_evidence(RenderCtx& ctx, const Model& m, const std::vector<ViewGPU>
   g_evidence.reserve((size_t)m.n * EV_ACC); g_evidence.zero(stream);
   g_view_acc.reserve((size_t)m.n * 3);
   bool use_normals = cfg.evidence_normal_weight > 0.f;
+  g_labels_valid = false;
+  if (cfg.export_labels) { g_labels.reserve((size_t)m.n * LABEL_BINS); g_labels.zero(stream); g_labels_valid = true; }
   for (size_t v = 0; v < views.size(); v++) {
     const ViewGPU& view = views[v];
     if (view.W != ctx.W || view.H != ctx.H) ctx.setup(view.W, view.H, m.cap, stream);
@@ -143,6 +220,10 @@ void compute_evidence(RenderCtx& ctx, const Model& m, const std::vector<ViewGPU>
     else
       evidence_kernel<false><<<grid, block, 0, stream>>>(ctx.tile_ranges, ctx.vals_sorted, ctx.proj0, ctx.proj1, ctx.proj2, ctx.proj3, ctx.out_rgba, ctx.out_feat, ctx.last_idx, view.rgba, nullptr, view.weights, ctx.W, ctx.H, ctx.tiles_x, masked_alpha, 0.f, g_view_acc);
     CUDA_KERNEL_CHECK();
+    if (g_labels_valid && view.labels) {
+      label_vote_kernel<<<grid, block, 0, stream>>>(ctx.tile_ranges, ctx.vals_sorted, ctx.proj0, ctx.proj1, ctx.last_idx, view.rgba, view.labels, view.weights, ctx.W, ctx.H, ctx.tiles_x, masked_alpha, g_labels);
+      CUDA_KERNEL_CHECK();
+    }
     float3 cp = make_float3(cams[v].pos[0], cams[v].pos[1], cams[v].pos[2]);
     fold_view_kernel<<<div_up(m.n, 256), 256, 0, stream>>>(m.n, g_view_acc, m.pos_op, cp, g_evidence);
     CUDA_KERNEL_CHECK();
@@ -160,6 +241,19 @@ std::vector<float> download_evidence(const Model& m, cudaStream_t stream) {
     e[0] = a[0]; e[1] = a[1]; e[2] = a[2];
     e[3] = a[7] > 0.f ? (a[0] * a[0]) / a[7] : 0.f;  // effective number of supporting views
     e[4] = a[4]; e[5] = a[5]; e[6] = a[6];
+  }
+  return out;
+}
+
+std::vector<float> download_labels(const Model& m, cudaStream_t stream) {
+  std::vector<float> out((size_t)m.n * 2, 0.f);
+  if (!g_labels_valid || g_labels.count < (size_t)m.n * LABEL_BINS) return out;
+  std::vector<float> acc = g_labels.download((size_t)m.n * LABEL_BINS, stream);
+  for (size_t i = 0; i < (size_t)m.n; i++) {
+    const float* a = &acc[i * LABEL_BINS];
+    float total = 0.f, best = 0.f; int win = 0;
+    for (int k = 0; k < LABEL_BINS; k++) { total += a[k]; if (a[k] > best) { best = a[k]; win = k; } }
+    if (total > 0.f) { out[i * 2] = (float)win; out[i * 2 + 1] = best / total; }
   }
   return out;
 }

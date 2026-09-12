@@ -10,6 +10,7 @@
 namespace b2c {
 
 const char* const EVIDENCE_FIELDS[7] = {"ev_w_in", "ev_w_all", "ev_err", "ev_views", "ev_dir_0", "ev_dir_1", "ev_dir_2"};
+const char* const LABEL_FIELDS[2] = {"seg_label", "seg_conf"};
 
 void SplatCloud::resize(size_t count, int degree) {
   n = count; sh_degree = degree;
@@ -17,6 +18,7 @@ void SplatCloud::resize(size_t count, int degree) {
   sh.assign(n * K() * 3, 0.f);
   for (size_t i = 0; i < n; i++) quat[i * 4] = 1.f;
   if (has_evidence) evidence.assign(n * 7, 0.f);
+  if (has_labels) labels.assign(n * 2, 0.f);
 }
 
 namespace {
@@ -128,6 +130,7 @@ SplatCloud read_ply(const std::string& path) {
 
   SplatCloud c;
   c.has_evidence = has("ev_w_in");
+  c.has_labels = has("seg_label");
   c.resize(n_vertex, degree);
   c.has_scales = has("scale_0");
   bool has_rgb = has("red") || has("r");
@@ -152,6 +155,7 @@ SplatCloud read_ply(const std::string& path) {
       for (int k = 1; k < K; k++)
         c.sh[(i * K + k) * 3 + ch] = (float)at(i, format("f_rest_%d", ch * (K - 1) + (k - 1)).c_str());
     if (c.has_evidence) for (int k = 0; k < 7; k++) c.evidence[i * 7 + k] = (float)at(i, EVIDENCE_FIELDS[k]);
+    if (c.has_labels) { c.labels[i * 2] = (float)at(i, "seg_label"); c.labels[i * 2 + 1] = has("seg_conf") ? (float)at(i, "seg_conf") : 1.f; }
   }
   return c;
 }
@@ -167,9 +171,10 @@ void write_ply(const std::string& path, const SplatCloud& c, const std::vector<s
   for (auto b : base) h += format("property float %s\n", b);
   for (int k = 0; k < 3 * (K - 1); k++) h += format("property float f_rest_%d\n", k);
   if (c.has_evidence) for (auto e : EVIDENCE_FIELDS) h += format("property float %s\n", e);
+  if (c.has_labels) for (auto e : LABEL_FIELDS) h += format("property float %s\n", e);
   h += "end_header\n";
   f.write(h.data(), h.size());
-  size_t row_len = 14 + 3 * (K - 1) + (c.has_evidence ? 7 : 0);
+  size_t row_len = 14 + 3 * (K - 1) + (c.has_evidence ? 7 : 0) + (c.has_labels ? 2 : 0);
   std::vector<float> row(row_len);
   std::vector<float> buf; buf.reserve(row_len * 4096);
   for (size_t i = 0; i < c.n; i++) {
@@ -184,6 +189,7 @@ void write_ply(const std::string& path, const SplatCloud& c, const std::vector<s
     size_t o = 14;
     for (int ch = 0; ch < 3; ch++) for (int k = 1; k < K; k++) r[o++] = c.sh[(i * K + k) * 3 + ch];
     if (c.has_evidence) for (int k = 0; k < 7; k++) r[o++] = c.evidence[i * 7 + k];
+    if (c.has_labels) { r[o++] = c.labels[i * 2]; r[o++] = c.labels[i * 2 + 1]; }
     buf.insert(buf.end(), row.begin(), row.end());
     if (buf.size() >= row_len * 4096) { f.write((const char*)buf.data(), buf.size() * 4); buf.clear(); }
   }

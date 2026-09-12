@@ -20,12 +20,16 @@ struct SplatCloud {
   bool has_scales = true;        // false when scales must be initialised (kNN)
   bool has_evidence = false;
   std::vector<float> evidence;   // [n][7]: w_in, w_all, err, views (effective count, see evidence.cu), dir xyz
+  bool has_labels = false;
+  std::vector<float> labels;     // [n][2]: seg_label (class id, integer-valued), seg_conf (winner's share, 0..1)
 
   int K() const { return sh_coeffs_for_degree(sh_degree); }
   void resize(size_t count, int degree);
 };
 
 extern const char* const EVIDENCE_FIELDS[7];
+// Appended after the ev_* block; plain float properties so a viewer that reads brush's layout skips them.
+extern const char* const LABEL_FIELDS[2];
 
 // Header-only probe: true when the file is a ply read_ply can load, i.e. one whose only
 // non-empty element is 'vertex'. A triangle mesh (the hollow proxy's mesh.ply) is not.

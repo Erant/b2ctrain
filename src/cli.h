@@ -48,6 +48,7 @@ struct Config {
   std::string export_path = "./{dataset}_exports/";
   std::string export_name = "export_{iter}.ply";
   bool export_evidence = false;
+  bool export_labels = false;
   std::optional<float> evidence_prune_inmask;
   float evidence_normal_weight = 0.0f;
   bool rerun_enabled = false;

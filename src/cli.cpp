@@ -115,6 +115,7 @@ const std::vector<std::pair<const char*, std::vector<Opt>>>& groups() {
       {"export-evidence", nullptr, "At the end of training, measure per-splat multi-view evidence against every training view and write it into the final ply as `ev_*` vertex properties", B(export_evidence)},
       {"evidence-prune-inmask", "EVIDENCE_PRUNE_INMASK", "Before the final export, drop splats whose in-mask contribution fraction (evidence `w_in / w_all`) is below this value, or that no training view supported at all. Implies computing evidence", FO(evidence_prune_inmask)},
       {"evidence-normal-weight", "EVIDENCE_NORMAL_WEIGHT", "Weight of the normal-map residual folded into the evidence residual when the dataset has `normals/` [default: 0.0]", F(evidence_normal_weight)},
+      {"export-labels", nullptr, "At the end of training, vote each splat a class from the dataset's `labels/` sidecar (8-bit class-id PNGs, one per training frame) by its rendered weight on each class's pixels over every training view, and write the winner and its share of the splat's weight into the final ply as `seg_label` / `seg_conf`. Views without a sidecar cast no vote", B(export_labels)},
     }},
     {"Rerun options", {
       {"rerun-enabled", nullptr, "(unsupported in b2ctrain)", B(rerun_enabled)},

@@ -177,17 +177,28 @@ int train_main(const Config& cfg) {
   auto do_export = [&](uint32_t iter, bool final_export) {
     std::string name = resolve_export_name(cfg, iter, total);
     fs::path out = fs::path(export_dir) / name;
-    bool want_evidence = final_export && (cfg.export_evidence || cfg.evidence_prune_inmask.has_value());
+    bool want_labels = final_export && cfg.export_labels && ds.n_labels > 0;
+    if (final_export && cfg.export_labels && ds.n_labels == 0) log_warn("--export-labels: no training view carries a labels/ sidecar, so the ply gets no seg_label");
+    bool want_evidence = final_export && (cfg.export_evidence || cfg.evidence_prune_inmask.has_value() || want_labels);
     SplatCloud c = model.download(stream);
     bake_min_scale_cpu(c, model, stream);
     if (want_evidence) {
       double te = now_seconds();
       compute_evidence(ctx, model, *evidence_views, gv.cams, cfg, stream, have_rig ? &rig : nullptr, &rig_view);
-      c.has_evidence = true; c.evidence = download_evidence(model, stream);
+      bool keep_evidence = cfg.export_evidence || cfg.evidence_prune_inmask.has_value();
+      c.has_evidence = keep_evidence; if (keep_evidence) c.evidence = download_evidence(model, stream);
+      if (want_labels) {
+        c.has_labels = true; c.labels = download_labels(model, stream);
+        size_t voted = 0; std::vector<size_t> per_class(256, 0);
+        for (size_t i = 0; i < c.n; i++) if (c.labels[i * 2 + 1] > 0.f) { voted++; per_class[(int)c.labels[i * 2]]++; }
+        std::string top; int shown = 0;
+        for (int k = 0; k < 256 && shown < 6; k++) { int best = -1; for (int j = 0; j < 256; j++) if (per_class[j] > 0 && (best < 0 || per_class[j] > per_class[best])) best = j; if (best < 0) break; top += format("%s%d:%zu", shown ? " " : "", best, per_class[best]); per_class[best] = 0; shown++; }
+        log_info("Label vote: %zu/%zu splats got a class from %d labelled view(s); most common class:count %s", voted, c.n, ds.n_labels, top.c_str());
+      }
       log_info("Computed evidence for %zu splats over %zu views in %.1fs", c.n, evidence_views->size(), now_seconds() - te);
       if (cfg.evidence_prune_inmask) {
         float f = *cfg.evidence_prune_inmask;
-        SplatCloud kept; kept.has_evidence = true; kept.has_scales = true;
+        SplatCloud kept; kept.has_evidence = true; kept.has_scales = true; kept.has_labels = c.has_labels;
         std::vector<size_t> idx;
         for (size_t i = 0; i < c.n; i++) { const float* e = &c.evidence[i * 7]; if (e[3] > 0.f && e[1] > 0.f && e[0] / e[1] >= f) idx.push_back(i); }
         int K = c.K();
@@ -199,6 +210,7 @@ int train_main(const Config& cfg) {
           kept.opacity[j] = c.opacity[i];
           for (int k = 0; k < K * 3; k++) kept.sh[j * K * 3 + k] = c.sh[i * K * 3 + k];
           for (int k = 0; k < 7; k++) kept.evidence[j * 7 + k] = c.evidence[i * 7 + k];
+          if (c.has_labels) { kept.labels[j * 2] = c.labels[i * 2]; kept.labels[j * 2 + 1] = c.labels[i * 2 + 1]; }
         }
         log_info("Evidence prune (inmask < %g): %zu -> %zu splats", f, c.n, kept.n);
         c = std::move(kept);

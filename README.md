@@ -31,6 +31,10 @@ cmake --build build
 - Evidence export (`--export-evidence`, `--evidence-prune-inmask`, `--evidence-normal-weight`) and confidence-gated
   rendering (`b2ctrain render --confidence ...`) matching brush-splat-render's output contract. `ev_views` is an
   effective (participation-ratio) view count rather than brush's thresholded one; see `src/train/evidence.cu`.
+- Per-splat class labels (`--export-labels`): a `labels/` sidecar of 8-bit class-id PNGs beside the frames (b2crunner
+  writes Sapiens2 Goliath ids) is voted onto the splats in the evidence replay — each splat's rendered weight on each
+  class's pixels, summed over the training views — and the winner and its share land in the ply as two extra float
+  properties, `seg_label` and `seg_conf`, after the `ev_*` block. Viewers that read brush's layout ignore them.
 
 ## Recipes
 

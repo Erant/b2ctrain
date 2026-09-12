@@ -8,6 +8,7 @@ struct ViewGPU {
   const uint32_t* rgba = nullptr;     // packed RGBA8 (premultiplied for transparent views)
   const uint32_t* normals = nullptr;  // packed RGBA8 normal map or nullptr
   const uint8_t* weights = nullptr;   // per-pixel loss weight or nullptr
+  const uint8_t* labels = nullptr;    // per-pixel class id (labels/ sidecar) or nullptr; read by the evidence pass only
   int W = 0, H = 0;
   bool has_alpha = false, masked = false;
   float alpha_coverage = 1.f;

@@ -12,4 +12,8 @@ struct BodyRig;
 void compute_evidence(RenderCtx& ctx, const Model& m, const std::vector<ViewGPU>& views, const std::vector<Camera>& cams, const Config& cfg, cudaStream_t stream,
                       BodyRig* rig = nullptr, const std::vector<int>* rig_views = nullptr);
 std::vector<float> download_evidence(const Model& m, cudaStream_t stream);
+// Per-splat class vote from the views' `labels` planes (see LABEL_BINS in evidence.cu). Accumulated by
+// compute_evidence when `cfg.export_labels` is set; [n][2] = (winning class id, its share of the splat's
+// voting weight), both 0 for a splat no labelled view rendered.
+std::vector<float> download_labels(const Model& m, cudaStream_t stream);
 }

@@ -1,6 +1,16 @@
 # b2ctrain: project state
 
-Last updated: 2026-09-09 (hollow loss). Written for whoever (human or Claude) picks this up next.
+Last updated: 2026-09-11 (per-splat labels). Written for whoever (human or Claude) picks this up next.
+
+**2026-09-11 — `--export-labels`.** A `labels/` sidecar (8-bit class-id PNGs, one per training frame; point-sampled
+if the frame is capped) is voted onto the splats at the final export inside the evidence replay: `label_vote_kernel`
+in `src/train/evidence.cu` accumulates each splat's `vis * k` (the w_all weight) into a 32-bin histogram per class,
+the winner and its share of the splat's total go into the ply as float `seg_label` / `seg_conf` after the `ev_*`
+block (only with `--export-evidence` does the ev_* block itself get written). Verified against an independent
+gsplat-gradient vote on a b2crunner deliverable (81 views, 332k splats, Sapiens2 labels): 99.8% of splats get the
+same class, confidences within 0.001 median; `b2c_tests` has a two-class seam test and a ply round trip. The pass
+adds ~0.2 s to the 0.4 s evidence pass. Labels are not warped in `--align-warp frames` mode (the ~1 px flow is noise
+against an 81-view vote); the per-view rig is applied, as for the evidence.
 
 ## One-line summary
 
@@ -738,13 +748,14 @@ scale as the frames' eyes, so it is not the resolution bottleneck.
 
 ```
 src/cli.*              brush-compatible argument parser (+ --sh-fp16 (opt-in), --res-*-until, --align-*)
-src/dataset/            COLMAP + sidecar loader (masks/normals/weights/init.ply)
-src/ply.*               PLY reader/writer (brush field order + ev_* evidence block)
+src/dataset/            COLMAP + sidecar loader (masks/normals/weights/labels/init.ply)
+src/ply.*               PLY reader/writer (brush field order + ev_* evidence block + seg_label/seg_conf)
 src/model.*             GPU splat parameter/moment buffers (SH bands >= 1 optionally fp16 via ShBuf in gpu/util.cuh)
 src/gpu/                CUDA kernels: project, binning, raster fwd/bwd (+ tensor-core variant), loss, optim
                         (fused projection-backward + Adam + noise), refine, images (resolution pyramid),
                         align (LK flow, Gaussian blur, Lanczos warp for the alignment loop)
 src/train/              trainer (phases: main run + alignment refits), GPU-resident views, splat init, evidence
+                        (+ the --export-labels class vote, same replay)
 src/render/             `b2ctrain render` subcommand + confidence model
 tests/                  finite-difference gradient test against a double-precision CPU reference; flow/warp tests
 bench/                  eval_ply.py (mask-weighted PSNR/SSIM), colmap_to_cameras.py, compare_images.py,

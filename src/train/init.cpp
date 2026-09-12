@@ -109,7 +109,7 @@ SplatCloud initial_splats(const Dataset& ds, const Config& cfg) {
   if (c.n > cfg.max_splats) {
     size_t step = (c.n + cfg.max_splats - 1) / cfg.max_splats;
     log_warn("initial cloud has %zu points, subsampling by %zu to respect --max-splats", c.n, step);
-    SplatCloud s; s.has_scales = c.has_scales; s.has_evidence = false;
+    SplatCloud s; s.has_scales = c.has_scales; s.has_evidence = false; s.has_labels = false;
     size_t m = (c.n + step - 1) / step; s.resize(m, c.sh_degree);
     int K = c.K();
     for (size_t j = 0, i = 0; i < c.n; i += step, j++) {
@@ -132,6 +132,7 @@ SplatCloud initial_splats(const Dataset& ds, const Config& cfg) {
     c.sh = std::move(sh); c.sh_degree = (int)cfg.sh_degree;
   }
   c.has_evidence = false; c.evidence.clear();
+  c.has_labels = false; c.labels.clear();
   return c;
 }
 

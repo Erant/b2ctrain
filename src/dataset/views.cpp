@@ -20,7 +20,7 @@ namespace fs = std::filesystem;
 namespace {
 std::string lower(std::string s) { for (auto& c : s) c = (char)std::tolower((unsigned char)c); return s; }
 std::string file_stem(const std::string& name) { auto p = name.rfind('.'); return p == std::string::npos ? name : name.substr(0, p); }
-bool is_sidecar_dir(const std::string& comp) { return comp == "masks" || comp == "normals" || comp == "weights"; }
+bool is_sidecar_dir(const std::string& comp) { return comp == "masks" || comp == "normals" || comp == "weights" || comp == "labels"; }
 
 // Files under <root>/<dir>/ (recursively), keyed by lowercase stem and lowercase filename.
 struct SidecarIndex {
@@ -119,14 +119,14 @@ Dataset load_dataset(const Config& cfg) {
   }
   if (cfg.max_frames && images.size() > *cfg.max_frames) images.resize(*cfg.max_frames);
 
-  SidecarIndex masks, normals, weights;
-  masks.build(root / "masks"); normals.build(root / "normals"); weights.build(root / "weights");
-  if (masks.entries.empty() || normals.entries.empty() || weights.entries.empty()) {
+  SidecarIndex masks, normals, weights, labels;
+  masks.build(root / "masks"); normals.build(root / "normals"); weights.build(root / "weights"); labels.build(root / "labels");
+  if (masks.entries.empty() || normals.entries.empty() || weights.entries.empty() || labels.entries.empty()) {
     // Sidecar dirs may live next to the model dir instead.
-    if (model_dir != root) { if (masks.entries.empty()) masks.build(model_dir / "masks"); if (normals.entries.empty()) normals.build(model_dir / "normals"); if (weights.entries.empty()) weights.build(model_dir / "weights"); }
+    if (model_dir != root) { if (masks.entries.empty()) masks.build(model_dir / "masks"); if (normals.entries.empty()) normals.build(model_dir / "normals"); if (weights.entries.empty()) weights.build(model_dir / "weights"); if (labels.entries.empty()) labels.build(model_dir / "labels"); }
   }
 
-  struct Job { ColmapImage im; std::string img_path, mask_path, normal_path, weight_path; };
+  struct Job { ColmapImage im; std::string img_path, mask_path, normal_path, weight_path, label_path; };
   std::vector<Job> jobs;
   for (auto& im : images) {
     Job j; j.im = im;
@@ -135,6 +135,7 @@ Dataset load_dataset(const Config& cfg) {
     j.mask_path = masks.find(im.name, true);
     j.normal_path = normals.find(im.name, false);
     j.weight_path = weights.find(im.name, false);
+    j.label_path = labels.find(im.name, false);
     jobs.push_back(j);
   }
   if (jobs.empty()) fail("dataset has no usable views");
@@ -194,6 +195,14 @@ Dataset load_dataset(const Config& cfg) {
           else v.weights[p] = wr[p * 4];
         }
       }
+      if (!j.label_path.empty()) {
+        // Class ids in the red channel (a greyscale PNG decodes to r = g = b). Point-sampled when the
+        // frame was capped: an interpolated class id is a different class.
+        Decoded lm = decode_rgba(j.label_path);
+        std::vector<unsigned char> lr = (lm.w == nw && lm.h == nh) ? lm.rgba : resize_rgba(lm.rgba, lm.w, lm.h, nw, nh, STBIR_FILTER_POINT_SAMPLE);
+        v.labels.resize((size_t)nw * nh);
+        for (size_t p = 0; p < (size_t)nw * nh; p++) v.labels[p] = lr[p * 4];
+      }
       if (!j.normal_path.empty()) {
         Decoded nm = decode_rgba(j.normal_path);
         std::vector<unsigned char> nr = (nm.w == nw && nm.h == nh) ? nm.rgba : resize_rgba(nm.rgba, nm.w, nm.h, nw, nh, STBIR_FILTER_POINT_SAMPLE);
@@ -223,6 +232,7 @@ Dataset load_dataset(const Config& cfg) {
     if (v.has_alpha) { if (v.mode == AlphaMode::Masked) ds.n_masked++; else ds.n_transparent++; }
     if (v.has_weights()) ds.n_weighted++;
     if (v.has_normals()) ds.n_normals++;
+    if (v.has_labels()) ds.n_labels++;
     if (cfg.eval_split_every && *cfg.eval_split_every > 0 && i % *cfg.eval_split_every == 0) ds.eval.push_back(std::move(v));
     else ds.train.push_back(std::move(v));
   }
@@ -236,6 +246,7 @@ Dataset load_dataset(const Config& cfg) {
   }
   if (ds.n_weighted) log_info("Dataset loss weights: %d view(s) carry a weights/ sidecar", ds.n_weighted);
   if (ds.n_normals) log_info("Dataset normals: %d view(s) carry a normals/ sidecar", ds.n_normals);
+  if (ds.n_labels) log_info("Dataset labels: %d view(s) carry a labels/ sidecar", ds.n_labels);
   if (!ds.init_ply.empty()) log_info("Using '%s' as the initial splat", ds.init_ply.c_str());
   else log_info("Initial point cloud: %zu points", ds.points.size());
   return ds;

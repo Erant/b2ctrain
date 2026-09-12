@@ -12,6 +12,8 @@
 #include "reference.h"
 #include "gpu/align.h"
 #include "gpu/deform.h"
+#include "train/evidence.h"
+#include "cli.h"
 #include <cstdio>
 
 using namespace b2c;
@@ -249,6 +251,47 @@ static int test_deform() {
   return fails;
 }
 
+// The label vote: a frame whose left half is class 3 and right half class 13 must label every splat
+// by the side its centre projects to, at full confidence away from the seam; the seg_label/seg_conf
+// columns must survive a ply round trip.
+static int test_labels() {
+  int fails = 0;
+  Scene s = make_scene(11, 60);
+  Model model; model.upload(s.cloud);
+  RenderCtx ctx; ctx.setup(s.W, s.H, model.cap, 0);
+  DevBuf<uint32_t> gt; gt.upload(s.gt);
+  std::vector<uint8_t> lab(s.W * s.H);
+  for (int y = 0; y < s.H; y++) for (int x = 0; x < s.W; x++) lab[y * s.W + x] = x < s.W / 2 ? 3 : 13;
+  DevBuf<uint8_t> dlab; dlab.upload(lab);
+  ViewGPU view; view.rgba = gt; view.labels = dlab; view.W = s.W; view.H = s.H; view.has_alpha = true; view.masked = false;
+  std::vector<ViewGPU> views{view}; std::vector<Camera> cams{s.cam};
+  Config cfg; cfg.export_labels = true;
+  compute_evidence(ctx, model, views, cams, cfg, 0);
+  std::vector<float> lv = download_labels(model, 0);
+  int checked = 0, voted = 0;
+  for (int i = 0; i < model.n; i++) {
+    float x = s.cloud.pos[i * 3], z = s.cloud.pos[i * 3 + 2];
+    float px = s.cam.fx * x / z + s.cam.cx;
+    if (lv[i * 2 + 1] > 0.f) voted++;
+    if (std::abs(px - s.W / 2.f) < 6.f || px < 2 || px > s.W - 2) continue;  // straddles the seam or the frame edge
+    checked++;
+    int want = px < s.W / 2.f ? 3 : 13;
+    bool ok = (int)lv[i * 2] == want && lv[i * 2 + 1] > 0.9f;
+    if (!ok) { fails++; printf("labels: splat %d at px %.1f voted %d (conf %.3f), expected %d\n", i, px, (int)lv[i * 2], lv[i * 2 + 1], want); }
+  }
+  printf("label vote: %d/%d splats voted, %d away from the seam checked, %d wrong\n", voted, model.n, checked, fails);
+  SplatCloud c = model.download(0); c.has_labels = true; c.labels = lv;
+  const char* path = "/tmp/b2c_test_labels.ply";
+  write_ply(path, c, {"SH degree: 2"});
+  SplatCloud back = read_ply(path);
+  bool rt = back.has_labels && back.n == c.n;
+  for (size_t i = 0; rt && i < c.n * 2; i++) if (back.labels[i] != c.labels[i]) rt = false;
+  printf("label ply round trip: %s\n", rt ? "ok" : "MISMATCH");
+  if (!rt) fails++;
+  std::remove(path);
+  return fails;
+}
+
 int main(int argc, char** argv) {
   int align_fails = test_align();
   int deform_fails = test_deform();
@@ -300,6 +343,7 @@ int main(int argc, char** argv) {
     printf("cfg %d (%s%s%s%s): checked %d params, max rel err %.4f\n", cfg, masked ? "masked" : "transparent", normals ? "+normals" : "", tc ? " tc" : " warp", hollow ? " +hollow" : "", checked, max_rel);
   }
   printf("%d / %d mismatches (%d non-smooth points skipped)\n", fails, total, skipped);
+  fails += test_labels();
   if (align_fails) printf("%d alignment test failure(s)\n", align_fails);
   return (fails == 0 && align_fails == 0 && deform_fails == 0) ? 0 : 1;
 }
