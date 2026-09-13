@@ -1,4 +1,7 @@
 #include "cli.h"
+#ifndef B2CTRAIN_GIT_SHA
+#define B2CTRAIN_GIT_SHA "unknown"
+#endif
 #include "util/log.h"
 #include <cstring>
 #include <cstdlib>
@@ -187,7 +190,7 @@ Config parse_args(int argc, char** argv) {
   for (int i = 1; i < argc; i++) {
     std::string a = argv[i];
     if (a == "-h" || a == "--help") { c.help = true; continue; }
-    if (a == "-V" || a == "--version") { printf("b2ctrain 0.1.0\n"); exit(0); }
+    if (a == "-V" || a == "--version") { printf("b2ctrain 0.1.0 (%s)\n", B2CTRAIN_GIT_SHA); exit(0); }
     if (a.rfind("--", 0) != 0) {
       if (!c.source.empty()) fail("unexpected argument '%s' found", a.c_str());
       c.source = a; continue;

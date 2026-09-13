@@ -58,6 +58,43 @@ add_library(b2c_core STATIC
   src/render/probe.cpp
 )
 target_include_directories(b2c_core PUBLIC src third_party ${CUDAToolkit_INCLUDE_DIRS})
+
+# The commit this binary was built from, printed by `--version`, so a run's
+# log can say which trainer it ran (b2crunner's machine banner reads it).
+# Taken from the checkout at configure time; the configure is re-run when
+# HEAD or the branch it points at moves, so a plain `cmake --build` after a
+# commit or checkout picks the new sha up rather than keeping the old one.
+# `-dirty` when tracked files are modified. Pass -DB2CTRAIN_GIT_SHA=... to
+# name it by hand (a source tarball has no .git).
+if(NOT B2CTRAIN_GIT_SHA)
+  set(B2CTRAIN_GIT_SHA "unknown")
+  find_package(Git QUIET)
+  if(GIT_FOUND AND EXISTS "${CMAKE_SOURCE_DIR}/.git")
+    execute_process(COMMAND ${GIT_EXECUTABLE} -C "${CMAKE_SOURCE_DIR}" rev-parse --short=12 HEAD
+      OUTPUT_VARIABLE _sha OUTPUT_STRIP_TRAILING_WHITESPACE RESULT_VARIABLE _rc ERROR_QUIET)
+    if(_rc EQUAL 0)
+      execute_process(COMMAND ${GIT_EXECUTABLE} -C "${CMAKE_SOURCE_DIR}" status --porcelain --untracked-files=no
+        OUTPUT_VARIABLE _dirty OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+      set(B2CTRAIN_GIT_SHA "${_sha}")
+      if(_dirty)
+        string(APPEND B2CTRAIN_GIT_SHA "-dirty")
+      endif()
+      execute_process(COMMAND ${GIT_EXECUTABLE} -C "${CMAKE_SOURCE_DIR}" rev-parse --git-path HEAD
+        OUTPUT_VARIABLE _head OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+      execute_process(COMMAND ${GIT_EXECUTABLE} -C "${CMAKE_SOURCE_DIR}" symbolic-ref -q HEAD
+        OUTPUT_VARIABLE _ref OUTPUT_STRIP_TRAILING_WHITESPACE RESULT_VARIABLE _ref_rc ERROR_QUIET)
+      set(_watch "${CMAKE_SOURCE_DIR}/${_head}")
+      if(_ref_rc EQUAL 0)
+        execute_process(COMMAND ${GIT_EXECUTABLE} -C "${CMAKE_SOURCE_DIR}" rev-parse --git-path "${_ref}"
+          OUTPUT_VARIABLE _ref_path OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+        list(APPEND _watch "${CMAKE_SOURCE_DIR}/${_ref_path}")
+      endif()
+      set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${_watch})
+    endif()
+  endif()
+endif()
+message(STATUS "b2ctrain commit: ${B2CTRAIN_GIT_SHA}")
+set_source_files_properties(src/cli.cpp PROPERTIES COMPILE_DEFINITIONS "B2CTRAIN_GIT_SHA=\"${B2CTRAIN_GIT_SHA}\"")
 target_link_libraries(b2c_core PUBLIC Threads::Threads)
 target_compile_options(b2c_core PRIVATE
   $<$<COMPILE_LANGUAGE:CXX>:-Wall -Wextra -Wno-unused-parameter -Wno-missing-field-initializers -Wno-unknown-pragmas -O3>
