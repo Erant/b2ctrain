@@ -67,15 +67,16 @@ TriMesh read_ply_mesh(const std::string& path) {
   auto take = [&](size_t n) { if (off + n > body.size()) fail("mesh '%s': truncated ply data", path.c_str()); const unsigned char* p = body.data() + off; off += n; return p; };
   for (auto& e : elems) {
     bool is_v = e.name == "vertex", is_f = e.name == "face";
-    int ix = -1, iy = -1, iz = -1, ilist = -1, ir = -1, ig = -1, ib = -1, inx = -1, iny = -1, inz = -1;
+    int ix = -1, iy = -1, iz = -1, ilist = -1, ir = -1, ig = -1, ib = -1, ia = -1, inx = -1, iny = -1, inz = -1;
     for (size_t k = 0; k < e.props.size(); k++) {
       const std::string& pn = e.props[k].name;
       if (pn == "x") ix = (int)k; else if (pn == "y") iy = (int)k; else if (pn == "z") iz = (int)k;
       else if (pn == "red" || pn == "r") ir = (int)k; else if (pn == "green" || pn == "g") ig = (int)k; else if (pn == "blue" || pn == "b") ib = (int)k;
+      else if (pn == "alpha" || pn == "a") ia = (int)k;
       else if (pn == "nx") inx = (int)k; else if (pn == "ny") iny = (int)k; else if (pn == "nz") inz = (int)k;
       if (e.props[k].list && (pn == "vertex_indices" || pn == "vertex_index")) ilist = (int)k;
     }
-    bool has_col = is_v && ir >= 0 && ig >= 0 && ib >= 0, has_nrm = is_v && inx >= 0 && iny >= 0 && inz >= 0;
+    bool has_col = is_v && ir >= 0 && ig >= 0 && ib >= 0, has_nrm = is_v && inx >= 0 && iny >= 0 && inz >= 0, has_alpha = has_col && ia >= 0;
     // Colours as 0..255 whatever the property type (a float colour is taken as 0..1).
     auto col8 = [&](double c, PT t) { double s = (t == PT::F32 || t == PT::F64) ? c * 255.0 : c; return (uint8_t)(s < 0 ? 0 : s > 255 ? 255 : s + 0.5); };
     if (is_v && (ix < 0 || iy < 0 || iz < 0)) fail("mesh '%s': vertex element without x/y/z", path.c_str());
@@ -107,6 +108,7 @@ TriMesh read_ply_mesh(const std::string& path) {
       if (is_v) {
         m.v.push_back((float)vals[ix]); m.v.push_back((float)vals[iy]); m.v.push_back((float)vals[iz]);
         if (has_col) { m.col.push_back(col8(vals[ir], e.props[ir].type)); m.col.push_back(col8(vals[ig], e.props[ig].type)); m.col.push_back(col8(vals[ib], e.props[ib].type)); }
+        if (has_alpha) m.alpha.push_back(col8(vals[ia], e.props[ia].type));
         if (has_nrm) { m.nrm.push_back((float)vals[inx]); m.nrm.push_back((float)vals[iny]); m.nrm.push_back((float)vals[inz]); }
       }
       if (is_f) push_face(idx);
@@ -154,19 +156,21 @@ TriMesh read_mesh(const std::string& path) {
 void write_ply_mesh(const std::string& path, const TriMesh& m) {
   FILE* fp = fopen(path.c_str(), "wb");
   if (!fp) fail("failed to write '%s'", path.c_str());
-  bool nrm = m.has_normals(), col = m.has_colour();
+  bool nrm = m.has_normals(), col = m.has_colour(), alp = col && m.has_alpha();
   std::string hdr = "ply\nformat binary_little_endian 1.0\ncomment Created by b2ctrain\nelement vertex " + std::to_string(m.nv()) + "\nproperty float x\nproperty float y\nproperty float z\n";
   if (nrm) hdr += "property float nx\nproperty float ny\nproperty float nz\n";
   if (col) hdr += "property uchar red\nproperty uchar green\nproperty uchar blue\n";
+  if (alp) hdr += "property uchar alpha\n";
   hdr += "element face " + std::to_string(m.nf()) + "\nproperty list uchar uint vertex_indices\nend_header\n";
   fwrite(hdr.data(), 1, hdr.size(), fp);
-  size_t rec = 12 + (nrm ? 12 : 0) + (col ? 3 : 0);
+  size_t rec = 12 + (nrm ? 12 : 0) + (col ? 3 : 0) + (alp ? 1 : 0);
   std::vector<unsigned char> buf(rec * m.nv());
   for (size_t i = 0; i < m.nv(); i++) {
     unsigned char* p = buf.data() + i * rec;
     memcpy(p, &m.v[i * 3], 12); p += 12;
     if (nrm) { memcpy(p, &m.nrm[i * 3], 12); p += 12; }
-    if (col) { p[0] = m.col[i * 3]; p[1] = m.col[i * 3 + 1]; p[2] = m.col[i * 3 + 2]; }
+    if (col) { p[0] = m.col[i * 3]; p[1] = m.col[i * 3 + 1]; p[2] = m.col[i * 3 + 2]; p += 3; }
+    if (alp) p[0] = m.alpha[i];
   }
   fwrite(buf.data(), 1, buf.size(), fp);
   buf.assign(13 * m.nf(), 0);

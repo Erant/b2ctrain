@@ -43,11 +43,12 @@ __global__ void atlas_raster_kernel(int nf, const float2* __restrict__ uv, const
   }
 }
 // Colour of the original mesh at the closest point of every covered texel (barycentric on the found triangle).
-__global__ void colour_kernel(int n, const int* __restrict__ tri, const float3* __restrict__ bary, const uint3* __restrict__ f, const uint8_t* __restrict__ col, uint8_t* __restrict__ out) {
+__global__ void colour_kernel(int n, const int* __restrict__ tri, const float3* __restrict__ bary, const uint3* __restrict__ f, const uint8_t* __restrict__ col, const uint8_t* __restrict__ alpha, uint8_t* __restrict__ out, uint8_t* __restrict__ out_alpha) {
   int i = blockIdx.x * blockDim.x + threadIdx.x; if (i >= n) return;
-  int t = tri[i]; float3 b = bary[i]; float c[3] = {0, 0, 0};
-  if (t >= 0) { uint3 fc = f[t]; for (int k = 0; k < 3; k++) c[k] = b.x * col[fc.x * 3 + k] + b.y * col[fc.y * 3 + k] + b.z * col[fc.z * 3 + k]; }
+  int t = tri[i]; float3 b = bary[i]; float c[3] = {0, 0, 0}; float a = 0.f;
+  if (t >= 0) { uint3 fc = f[t]; for (int k = 0; k < 3; k++) c[k] = b.x * col[fc.x * 3 + k] + b.y * col[fc.y * 3 + k] + b.z * col[fc.z * 3 + k]; if (alpha) a = b.x * alpha[fc.x] + b.y * alpha[fc.y] + b.z * alpha[fc.z]; }
   for (int k = 0; k < 3; k++) out[i * 3 + k] = (uint8_t)fminf(fmaxf(c[k] + 0.5f, 0.f), 255.f);
+  if (out_alpha) out_alpha[i] = (uint8_t)fminf(fmaxf(a + 0.5f, 0.f), 255.f);
 }
 // Jump flooding: nearest covered texel for every texel (seed = own index where covered, -1 elsewhere).
 __global__ void jfa_init_kernel(int R, const int* __restrict__ tri, int* __restrict__ seed) { size_t i = blockIdx.x * (size_t)blockDim.x + threadIdx.x; if (i < (size_t)R * R) seed[i] = tri[i] >= 0 ? (int)i : -1; }
@@ -175,22 +176,23 @@ int mesh_unwrap_main(int argc, char** argv) {
   log_info("rasterised: %.1f%% texels covered (%.1fs)", 100.0 * ncov / npx, now_seconds() - t0);
   // Colour from the original mesh at the closest surface point of every covered texel.
   std::vector<int> cov_idx; cov_idx.reserve(ncov); for (size_t i = 0; i < npx; i++) if (htri[i] >= 0) cov_idx.push_back((int)i);
-  std::vector<uint8_t> tex(npx * 3, 0);
+  std::vector<uint8_t> tex(npx * 3, 0), tex_alpha(npx, 0); bool src_alpha = src.has_alpha();
   {
     TriGrid tg; tg.build(src, 0.004f, false, stream);
-    MeshRaster sr; sr.upload(src, stream); DevBuf<uint8_t> scol; scol.upload(src.col, stream);
+    MeshRaster sr; sr.upload(src, stream); DevBuf<uint8_t> scol, salpha; scol.upload(src.col, stream); if (src_alpha) salpha.upload(src.alpha, stream);
     std::vector<float3> hpos = pos.download(npx, stream);
-    const int CH = 1 << 20; DevBuf<float3> q, cp, qb; DevBuf<int> qt; DevBuf<float> qd; DevBuf<uint8_t> qc;
-    q.reserve(CH); cp.reserve(CH); qb.reserve(CH); qt.reserve(CH); qd.reserve(CH); qc.reserve((size_t)CH * 3);
+    const int CH = 1 << 20; DevBuf<float3> q, cp, qb; DevBuf<int> qt; DevBuf<float> qd; DevBuf<uint8_t> qc, qa;
+    q.reserve(CH); cp.reserve(CH); qb.reserve(CH); qt.reserve(CH); qd.reserve(CH); qc.reserve((size_t)CH * 3); qa.reserve(CH);
     std::vector<float3> hq(CH); std::vector<float> dists; dists.reserve(ncov);
     for (size_t off = 0; off < cov_idx.size(); off += CH) {
       int n = (int)std::min<size_t>(CH, cov_idx.size() - off);
       for (int k = 0; k < n; k++) hq[k] = hpos[cov_idx[off + k]];
       q.upload(hq.data(), n, stream);
       closest_points_gpu(tg.dev(), q, n, 12, qt, cp, qd, qb, nullptr, stream);
-      colour_kernel<<<div_up(n, 256), 256, 0, stream>>>(n, qt, qb, sr.f, scol, qc); CUDA_KERNEL_CHECK();
+      colour_kernel<<<div_up(n, 256), 256, 0, stream>>>(n, qt, qb, sr.f, scol, src_alpha ? salpha.ptr : nullptr, qc, src_alpha ? qa.ptr : nullptr); CUDA_KERNEL_CHECK();
       std::vector<uint8_t> hc = qc.download((size_t)n * 3, stream); std::vector<float> hd = qd.download(n, stream);
-      for (int k = 0; k < n; k++) { size_t i = cov_idx[off + k]; tex[i * 3] = hc[k * 3]; tex[i * 3 + 1] = hc[k * 3 + 1]; tex[i * 3 + 2] = hc[k * 3 + 2]; dists.push_back(hd[k]); }
+      std::vector<uint8_t> hal; if (src_alpha) hal = qa.download(n, stream);
+      for (int k = 0; k < n; k++) { size_t i = cov_idx[off + k]; tex[i * 3] = hc[k * 3]; tex[i * 3 + 1] = hc[k * 3 + 1]; tex[i * 3 + 2] = hc[k * 3 + 2]; if (src_alpha) tex_alpha[i] = hal[k]; dists.push_back(hd[k]); }
     }
     std::sort(dists.begin(), dists.end());
     log_info("closest-point distance p50 %.2f mm p99 %.2f mm (%.1fs)", dists.empty() ? 0.0 : dists[dists.size() / 2] * 1000, dists.empty() ? 0.0 : dists[(size_t)(0.99 * (dists.size() - 1))] * 1000, now_seconds() - t0);
@@ -216,7 +218,15 @@ int mesh_unwrap_main(int argc, char** argv) {
 
   // ---- protection masks ----
   size_t ncov_d = 0; for (auto m : maskd) ncov_d += m > 0;
-  if (!cap_path.empty()) {
+  if (src_alpha) {
+    // The bake carried the cap's coverage as the vertex alpha: the protected texels are those whose colour is the
+    // photograph's (full alpha; the feathered rim stays repaintable, and so do the hair-strand holes).
+    std::vector<uint8_t> prot(npx, 0); size_t nprot = 0, ncap = 0;
+    for (size_t i = 0; i < npx; i++) { if (!maskd[i]) continue; uint8_t a = htri[i] >= 0 ? tex_alpha[i] : 0; if (a > 0) ncap++; if (a >= 254) { prot[i] = 255; nprot++; } }
+    write_png8(out + "/protect_cap.png", R, R, 1, prot.data());
+    log_info("protect_cap.png from the bake's cap coverage: %zu texels touched by the cap, %zu protected (full coverage)", ncap, nprot);
+    if (!cap_path.empty()) log_info("(--cap's point footprint not used: the mesh carries the projected coverage)");
+  } else if (!cap_path.empty()) {
     std::vector<float> pts = read_points(cap_path);
     PointGrid pg; pg.build(pts, cap_erode, stream);
     if (cap_spacing <= 0.f) { DevBuf<float> sp; sp.reserve(pg.n); nn_spacing_kernel<<<div_up(pg.n, 256), 256, 0, stream>>>(pg.dev(), sp); CUDA_KERNEL_CHECK(); std::vector<float> h = sp.download(pg.n, stream); std::sort(h.begin(), h.end()); cap_spacing = h.empty() ? 1e-3f : h[h.size() / 2]; log_info("cap spacing %.2f mm", cap_spacing * 1000); }

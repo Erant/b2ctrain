@@ -316,6 +316,8 @@ int mesh_bake_main(int argc, char** argv) {
       log_info("levelled: mean low-band shift on the cap (%.3f, %.3f, %.3f) over %zu vertices", shift[0] / std::max<size_t>(nsh, 1), shift[1] / std::max<size_t>(nsh, 1), shift[2] / std::max<size_t>(nsh, 1), nsh);
     }
     colours.upload(Cf, stream);
+    // The cap's coverage travels with the mesh as the vertex alpha: mesh-unwrap's protect_cap.png is the texels whose colour came from the photograph.
+    m.alpha.resize(nv); for (int i = 0; i < nv; i++) m.alpha[i] = (uint8_t)std::min(std::max(ha[i] * 255.f + 0.5f, 0.f), 255.f);
   }
   std::vector<float3> C = colours.download(nv, stream), N = vn.download(nv, stream);
   m.col.resize((size_t)nv * 3); m.nrm.resize((size_t)nv * 3);
