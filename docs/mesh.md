@@ -65,3 +65,14 @@ unwrap 56 s (xatlas 50 s), render 0.1 s/view, backproject ~0.2 s/view.
 Two deliberate deviations from the reference: the cavity fill (the reference leaves interior sheets for `min-comp` to
 drop, which works only when they are disconnected), and the winding-count sign of the prior (open3d's one-ray parity
 calls the overlap of the arm and the torso outside; that put a sheet 3 cm inside the chest of 00307).
+
+## The pipeline side (b2crunner 4c55201)
+
+`meshify` (steps/meshify.py, the `export_mesh` output, off by default) runs the chain on the stage-2 splat with the
+refit body, the face cap and the Sapiens normal maps of the training frames; `refine_texture` (steps/refine_texture.py,
+the `refine_texture` setting, wan22 env) is the klein loop with `face_policy` deciding what it never repaints. The
+bake writes the cap's coverage as the ply's vertex alpha and the unwrap turns it into `protect_cap.png` (the
+point-footprint fallback needs the cap on the surface, which the prior face geometry does not give).
+
+End to end (2026-09-16): `out/mesh/tools/b2c_arm.sh` built the pod pass-2 A/B's fourth arm (`out/mesh/ab2/ds_mesh_b2c`)
+from sgc3's inputs in ~6 minutes including the klein loop; the face sits 0.8 px from the photograph at the anchor.
