@@ -4,6 +4,7 @@
 #include <sstream>
 #include <cstring>
 #include <cstdlib>
+#include <cstdio>
 
 namespace b2c {
 
@@ -60,32 +61,40 @@ TriMesh read_ply_mesh(const std::string& path) {
   }
   TriMesh m;
   auto push_face = [&](const std::vector<uint32_t>& idx) { for (size_t k = 2; k < idx.size(); k++) { m.f.push_back(idx[0]); m.f.push_back(idx[k - 1]); m.f.push_back(idx[k]); } };
+  // The binary body is read in one go and parsed from memory (a per-property stream read is slow on a million vertices).
+  std::vector<unsigned char> body; size_t off = 0;
+  if (binary) { std::streampos here = f.tellg(); f.seekg(0, std::ios::end); size_t total = (size_t)(f.tellg() - here); f.seekg(here); body.resize(total); f.read((char*)body.data(), total); if ((size_t)f.gcount() != total) fail("mesh '%s': truncated ply data", path.c_str()); }
+  auto take = [&](size_t n) { if (off + n > body.size()) fail("mesh '%s': truncated ply data", path.c_str()); const unsigned char* p = body.data() + off; off += n; return p; };
   for (auto& e : elems) {
     bool is_v = e.name == "vertex", is_f = e.name == "face";
-    int ix = -1, iy = -1, iz = -1, ilist = -1;
+    int ix = -1, iy = -1, iz = -1, ilist = -1, ir = -1, ig = -1, ib = -1, inx = -1, iny = -1, inz = -1;
     for (size_t k = 0; k < e.props.size(); k++) {
-      if (e.props[k].name == "x") ix = (int)k; else if (e.props[k].name == "y") iy = (int)k; else if (e.props[k].name == "z") iz = (int)k;
-      if (e.props[k].list && (e.props[k].name == "vertex_indices" || e.props[k].name == "vertex_index")) ilist = (int)k;
+      const std::string& pn = e.props[k].name;
+      if (pn == "x") ix = (int)k; else if (pn == "y") iy = (int)k; else if (pn == "z") iz = (int)k;
+      else if (pn == "red" || pn == "r") ir = (int)k; else if (pn == "green" || pn == "g") ig = (int)k; else if (pn == "blue" || pn == "b") ib = (int)k;
+      else if (pn == "nx") inx = (int)k; else if (pn == "ny") iny = (int)k; else if (pn == "nz") inz = (int)k;
+      if (e.props[k].list && (pn == "vertex_indices" || pn == "vertex_index")) ilist = (int)k;
     }
+    bool has_col = is_v && ir >= 0 && ig >= 0 && ib >= 0, has_nrm = is_v && inx >= 0 && iny >= 0 && inz >= 0;
+    // Colours as 0..255 whatever the property type (a float colour is taken as 0..1).
+    auto col8 = [&](double c, PT t) { double s = (t == PT::F32 || t == PT::F64) ? c * 255.0 : c; return (uint8_t)(s < 0 ? 0 : s > 255 ? 255 : s + 0.5); };
     if (is_v && (ix < 0 || iy < 0 || iz < 0)) fail("mesh '%s': vertex element without x/y/z", path.c_str());
     if (is_f && ilist < 0) fail("mesh '%s': face element without vertex_indices", path.c_str());
     if (is_v) m.v.reserve(e.count * 3);
     std::vector<double> vals(e.props.size());
     std::vector<uint32_t> idx;
-    std::vector<unsigned char> buf;
+    if (is_f) m.f.reserve(e.count * 3);
     for (size_t n = 0; n < e.count; n++) {
       idx.clear();
       if (binary) {
         for (size_t k = 0; k < e.props.size(); k++) {
           const Prop& p = e.props[k];
           if (p.list) {
-            buf.resize(psize(p.count_type)); f.read((char*)buf.data(), buf.size());
-            size_t cnt = (size_t)rd(buf.data(), p.count_type);
-            buf.resize(psize(p.type) * cnt); f.read((char*)buf.data(), buf.size());
-            if ((int)k == ilist) for (size_t j = 0; j < cnt; j++) idx.push_back((uint32_t)rd(buf.data() + j * psize(p.type), p.type));
-          } else { buf.resize(psize(p.type)); f.read((char*)buf.data(), buf.size()); vals[k] = rd(buf.data(), p.type); }
+            size_t cnt = (size_t)rd(take(psize(p.count_type)), p.count_type);
+            const unsigned char* d = take(psize(p.type) * cnt);
+            if ((int)k == ilist) for (size_t j = 0; j < cnt; j++) idx.push_back((uint32_t)rd(d + j * psize(p.type), p.type));
+          } else vals[k] = rd(take(psize(p.type)), p.type);
         }
-        if (!f) fail("mesh '%s': truncated ply data", path.c_str());
       } else {
         if (!std::getline(f, line)) fail("mesh '%s': truncated ply data", path.c_str());
         std::istringstream ss(line);
@@ -95,7 +104,11 @@ TriMesh read_ply_mesh(const std::string& path) {
           else ss >> vals[k];
         }
       }
-      if (is_v) { m.v.push_back((float)vals[ix]); m.v.push_back((float)vals[iy]); m.v.push_back((float)vals[iz]); }
+      if (is_v) {
+        m.v.push_back((float)vals[ix]); m.v.push_back((float)vals[iy]); m.v.push_back((float)vals[iz]);
+        if (has_col) { m.col.push_back(col8(vals[ir], e.props[ir].type)); m.col.push_back(col8(vals[ig], e.props[ig].type)); m.col.push_back(col8(vals[ib], e.props[ib].type)); }
+        if (has_nrm) { m.nrm.push_back((float)vals[inx]); m.nrm.push_back((float)vals[iny]); m.nrm.push_back((float)vals[inz]); }
+      }
       if (is_f) push_face(idx);
     }
   }
@@ -105,16 +118,26 @@ TriMesh read_ply_mesh(const std::string& path) {
 TriMesh read_obj_mesh(const std::string& path) {
   std::ifstream f(path);
   if (!f) fail("failed to open mesh '%s'", path.c_str());
-  TriMesh m; std::string line;
+  TriMesh m; std::string line; bool any_vt = false;
   while (std::getline(f, line)) {
     if (line.size() < 2) continue;
     if (line[0] == 'v' && line[1] == ' ') { std::istringstream ss(line.substr(2)); float x, y, z; ss >> x >> y >> z; m.v.push_back(x); m.v.push_back(y); m.v.push_back(z); }
+    else if (line[0] == 'v' && line[1] == 't' && line.size() > 2 && line[2] == ' ') { std::istringstream ss(line.substr(3)); float u = 0, w = 0; ss >> u >> w; m.uv.push_back(u); m.uv.push_back(w); }
     else if (line[0] == 'f' && line[1] == ' ') {
-      std::istringstream ss(line.substr(2)); std::string tok; std::vector<uint32_t> idx;
-      while (ss >> tok) { long v = strtol(tok.c_str(), nullptr, 10); if (v < 0) v = (long)(m.v.size() / 3) + v + 1; idx.push_back((uint32_t)(v - 1)); }
-      for (size_t k = 2; k < idx.size(); k++) { m.f.push_back(idx[0]); m.f.push_back(idx[k - 1]); m.f.push_back(idx[k]); }
+      std::istringstream ss(line.substr(2)); std::string tok; std::vector<uint32_t> idx, tidx;
+      while (ss >> tok) {
+        char* end = nullptr; long v = strtol(tok.c_str(), &end, 10); if (v < 0) v = (long)(m.v.size() / 3) + v + 1; idx.push_back((uint32_t)(v - 1));
+        if (*end == '/' && end[1] != '/' && end[1] != '\0') { long t = strtol(end + 1, nullptr, 10); if (t < 0) t = (long)(m.uv.size() / 2) + t + 1; tidx.push_back((uint32_t)(t - 1)); any_vt = true; }
+        else tidx.push_back(0);
+      }
+      for (size_t k = 2; k < idx.size(); k++) {
+        m.f.push_back(idx[0]); m.f.push_back(idx[k - 1]); m.f.push_back(idx[k]);
+        m.fuv.push_back(tidx[0]); m.fuv.push_back(tidx[k - 1]); m.fuv.push_back(tidx[k]);
+      }
     }
   }
+  if (!any_vt || m.uv.empty()) { m.uv.clear(); m.fuv.clear(); }
+  else for (uint32_t i : m.fuv) if (i >= m.uv.size() / 2) fail("mesh '%s': uv index %u out of range (%zu uvs)", path.c_str(), i, m.uv.size() / 2);
   return m;
 }
 }  // namespace
@@ -126,6 +149,56 @@ TriMesh read_mesh(const std::string& path) {
   for (uint32_t i : m.f) if (i >= m.nv()) fail("mesh '%s': face index %u out of range (%zu vertices)", path.c_str(), i, m.nv());
   if (m.nf() == 0) fail("mesh '%s' has no triangles", path.c_str());
   return m;
+}
+
+void write_ply_mesh(const std::string& path, const TriMesh& m) {
+  FILE* fp = fopen(path.c_str(), "wb");
+  if (!fp) fail("failed to write '%s'", path.c_str());
+  bool nrm = m.has_normals(), col = m.has_colour();
+  std::string hdr = "ply\nformat binary_little_endian 1.0\ncomment Created by b2ctrain\nelement vertex " + std::to_string(m.nv()) + "\nproperty float x\nproperty float y\nproperty float z\n";
+  if (nrm) hdr += "property float nx\nproperty float ny\nproperty float nz\n";
+  if (col) hdr += "property uchar red\nproperty uchar green\nproperty uchar blue\n";
+  hdr += "element face " + std::to_string(m.nf()) + "\nproperty list uchar uint vertex_indices\nend_header\n";
+  fwrite(hdr.data(), 1, hdr.size(), fp);
+  size_t rec = 12 + (nrm ? 12 : 0) + (col ? 3 : 0);
+  std::vector<unsigned char> buf(rec * m.nv());
+  for (size_t i = 0; i < m.nv(); i++) {
+    unsigned char* p = buf.data() + i * rec;
+    memcpy(p, &m.v[i * 3], 12); p += 12;
+    if (nrm) { memcpy(p, &m.nrm[i * 3], 12); p += 12; }
+    if (col) { p[0] = m.col[i * 3]; p[1] = m.col[i * 3 + 1]; p[2] = m.col[i * 3 + 2]; }
+  }
+  fwrite(buf.data(), 1, buf.size(), fp);
+  buf.assign(13 * m.nf(), 0);
+  for (size_t i = 0; i < m.nf(); i++) { unsigned char* p = buf.data() + i * 13; p[0] = 3; memcpy(p + 1, &m.f[i * 3], 12); }
+  fwrite(buf.data(), 1, buf.size(), fp);
+  if (fclose(fp)) fail("failed to write '%s'", path.c_str());
+}
+
+void write_obj_mesh(const std::string& path, const TriMesh& m, const std::string& texture) {
+  std::string stem = path, dir;
+  auto slash = stem.find_last_of('/'); if (slash != std::string::npos) { dir = stem.substr(0, slash + 1); stem = stem.substr(slash + 1); }
+  auto dot = stem.rfind('.'); if (dot != std::string::npos) stem = stem.substr(0, dot);
+  FILE* fp = fopen(path.c_str(), "w");
+  if (!fp) fail("failed to write '%s'", path.c_str());
+  std::string out; out.reserve(m.nv() * 40 + m.nf() * 48);
+  char line[128];
+  out += "mtllib " + stem + ".mtl\n";
+  for (size_t i = 0; i < m.nv(); i++) { snprintf(line, sizeof line, "v %.6f %.6f %.6f\n", m.v[i * 3], m.v[i * 3 + 1], m.v[i * 3 + 2]); out += line; }
+  for (size_t i = 0; i < m.uv.size() / 2; i++) { snprintf(line, sizeof line, "vt %.6f %.6f\n", m.uv[i * 2], m.uv[i * 2 + 1]); out += line; }
+  out += "usemtl tex\n";
+  bool has_uv = m.has_uv();
+  for (size_t i = 0; i < m.nf(); i++) {
+    if (has_uv) snprintf(line, sizeof line, "f %u/%u %u/%u %u/%u\n", m.f[i * 3] + 1, m.fuv[i * 3] + 1, m.f[i * 3 + 1] + 1, m.fuv[i * 3 + 1] + 1, m.f[i * 3 + 2] + 1, m.fuv[i * 3 + 2] + 1);
+    else snprintf(line, sizeof line, "f %u %u %u\n", m.f[i * 3] + 1, m.f[i * 3 + 1] + 1, m.f[i * 3 + 2] + 1);
+    out += line;
+  }
+  fwrite(out.data(), 1, out.size(), fp);
+  if (fclose(fp)) fail("failed to write '%s'", path.c_str());
+  FILE* mp = fopen((dir + stem + ".mtl").c_str(), "w");
+  if (!mp) fail("failed to write '%s'", (dir + stem + ".mtl").c_str());
+  fprintf(mp, "newmtl tex\nKd 1 1 1\nmap_Kd %s\n", texture.c_str());
+  fclose(mp);
 }
 
 }  // namespace b2c

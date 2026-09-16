@@ -2,6 +2,7 @@
 #include "train/trainer.h"
 #include "render/renderer.h"
 #include "render/probe.h"
+#include "mesh/mesh_main.h"
 #include "util/log.h"
 #include <cstring>
 #include <cstdio>
@@ -10,6 +11,7 @@ int main(int argc, char** argv) {
   try {
     if (argc >= 2 && !strcmp(argv[1], "render")) return b2c::render_main(argc, argv);
     if (argc >= 2 && !strcmp(argv[1], "probe")) return b2c::probe_main(argc, argv);
+    if (int r = b2c::mesh_main(argc, argv); r >= 0) return r;
     b2c::Config cfg = b2c::parse_args(argc, argv);
     if (cfg.help) { fputs(b2c::help_text().c_str(), stdout); return 0; }
     if (cfg.source.empty()) b2c::fail("a dataset path is required (b2ctrain [OPTIONS] <PATH>)");

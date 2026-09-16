@@ -56,8 +56,22 @@ add_library(b2c_core STATIC
   src/render/renderer.cpp
   src/render/confidence.cu
   src/render/probe.cpp
+  src/mesh/common.cpp
+  src/mesh/mesh_main.cpp
+  src/mesh/raster.cu
+  src/mesh/fuse.cu
+  src/mesh/refine.cu
+  src/mesh/bake.cu
+  src/mesh/unwrap.cu
+  src/mesh/uvrender.cu
+  src/mesh/backproject.cu
+  third_party/xatlas/xatlas.cpp
+  third_party/meshoptimizer/simplifier.cpp
+  third_party/meshoptimizer/allocator.cpp
 )
 target_include_directories(b2c_core PUBLIC src third_party ${CUDAToolkit_INCLUDE_DIRS})
+# The vendored libraries are compiled as they ship (their warnings are not ours).
+set_source_files_properties(third_party/xatlas/xatlas.cpp third_party/meshoptimizer/simplifier.cpp third_party/meshoptimizer/allocator.cpp PROPERTIES COMPILE_OPTIONS "-w")
 
 # The commit this binary was built from, printed by `--version`, so a run's
 # log can say which trainer it ran (b2crunner's machine banner reads it).
@@ -106,6 +120,6 @@ add_executable(b2ctrain src/main.cpp)
 target_link_libraries(b2ctrain PRIVATE b2c_core)
 
 enable_testing()
-add_executable(b2c_tests tests/tests.cpp tests/reference.cpp)
+add_executable(b2c_tests tests/tests.cpp tests/reference.cpp tests/mesh_tests.cpp)
 target_link_libraries(b2c_tests PRIVATE b2c_core)
 add_test(NAME b2c_tests COMMAND b2c_tests)

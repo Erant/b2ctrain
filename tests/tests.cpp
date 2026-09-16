@@ -292,7 +292,11 @@ static int test_labels() {
   return fails;
 }
 
+int test_mesh();
+
 int main(int argc, char** argv) {
+  int mesh_fails = test_mesh();
+  if (mesh_fails) printf("mesh: %d failure(s)\n", mesh_fails);
   int align_fails = test_align();
   int deform_fails = test_deform();
   if (deform_fails) printf("deform: %d failure(s)\n", deform_fails);
@@ -345,5 +349,5 @@ int main(int argc, char** argv) {
   printf("%d / %d mismatches (%d non-smooth points skipped)\n", fails, total, skipped);
   fails += test_labels();
   if (align_fails) printf("%d alignment test failure(s)\n", align_fails);
-  return (fails == 0 && align_fails == 0 && deform_fails == 0) ? 0 : 1;
+  return (fails == 0 && align_fails == 0 && deform_fails == 0 && mesh_fails == 0) ? 0 : 1;
 }
