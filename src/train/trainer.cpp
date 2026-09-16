@@ -15,6 +15,7 @@
 #include "json.hpp"
 #include "stb_image_write.h"
 #include <random>
+#include <fstream>
 #include <filesystem>
 #include <algorithm>
 #include <cmath>
@@ -163,6 +164,29 @@ int train_main(const Config& cfg) {
     }
     CUDA_CHECK(cudaStreamSynchronize(stream));
     log_info("Body rig %s: %d joints, %d rig vertices, %d/%zu training views matched%s; splats render at their skinned per-view positions, the model stays canonical", cfg.body_rig.c_str(), rig.nj, rig.nv, matched, ds.train.size(), rig.has_delta ? ", with per-view vertex displacements (v3)" : "");
+    if (!cfg.body_rig_init.empty()) {
+      std::ifstream in(cfg.body_rig_init);
+      if (!in) fail("--body-rig-init %s: cannot open", cfg.body_rig_init.c_str());
+      nlohmann::json j; try { in >> j; } catch (const std::exception& e) { fail("--body-rig-init %s: %s", cfg.body_rig_init.c_str(), e.what()); }
+      std::vector<float3> om0((size_t)rig.nviews * rig.nj, make_float3(0.f, 0.f, 0.f));
+      int seeded_views = 0, seeded = 0, unknown = 0; double mx = 0;
+      for (const auto& view : j.at("views")) {
+        int v = rig.view_index(view.at("name").get<std::string>());
+        if (v < 0) { unknown++; continue; }
+        bool any = false;
+        for (const auto& [key, val] : view.at("omega").items()) {
+          int jj = std::stoi(key);
+          if (jj < 0 || jj >= rig.nj) fail("--body-rig-init %s: joint %d is not in the rig", cfg.body_rig_init.c_str(), jj);
+          if (!rig.active_h[jj]) continue;
+          float3 w = make_float3(val.at(0).get<float>(), val.at(1).get<float>(), val.at(2).get<float>());
+          om0[(size_t)v * rig.nj + jj] = w; any = true; seeded++;
+          mx = std::max(mx, (double)std::sqrt(w.x * w.x + w.y * w.y + w.z * w.z));
+        }
+        if (any) seeded_views++;
+      }
+      rig.set_init(om0, stream);
+      log_info("Body rig seed %s: %d rotations over %d views (max %.1f deg), %d views not in the rig; the zero pull anchors to the seed", cfg.body_rig_init.c_str(), seeded, seeded_views, mx * 57.29577951, unknown);
+    }
   }
   auto pose_for_view = [&](int vi, RenderParams& rp) {  // vi: training view index
     if (!have_rig || vi < 0 || rig_view[vi] < 0) return;
@@ -276,7 +300,8 @@ int train_main(const Config& cfg) {
       timer.mark("backward", stream);
 
       OptimParams op; op.cam = rp.cam; op.active_sh_degree = rp.sh_degree; op.t = ++model.adam_t; op.pos_override = rp.pos_override;
-      const bool rig_learn = have_rig && rp.pos_override && (ph.rig_learn_from_start || step >= cfg.body_rig_start_iter);
+      const bool rig_stopped = cfg.body_rig_stop_iter > 0 && (ph.rig_learn_from_start || step >= cfg.body_rig_stop_iter);
+      const bool rig_learn = have_rig && rp.pos_override && !rig_stopped && (ph.rig_learn_from_start || step >= cfg.body_rig_start_iter);
       if (rig_learn) op.g_pos_out = rig.g_pos;
       op.lr_mean = (float)(cfg.lr_mean * std::pow(lr_decay, (double)step - 1.0) * median_scale);
       op.lr_rot = cfg.lr_rotation; op.lr_scale = cfg.lr_scale; op.lr_opac = cfg.lr_opac; op.lr_dc = cfg.lr_coeffs_dc; op.lr_sh_rest = cfg.lr_coeffs_dc / cfg.lr_coeffs_sh_scale;
@@ -420,6 +445,17 @@ int train_main(const Config& cfg) {
           for (size_t p = 0; p < rgba.size(); p++) for (int c = 0; c < 3; c++) { float v = c == 0 ? rgba[p].x : (c == 1 ? rgba[p].y : rgba[p].z); dbg_render[p * 3 + c] = (unsigned char)std::min(std::max(v * 255.f + 0.5f, 0.f), 255.f); }
           CUDA_CHECK(cudaStreamSynchronize(stream));
         }
+      }
+      if (!cfg.align_dump_dir.empty() && !warp_render && it == cfg.align_iters) {
+        fs::path dir = cfg.align_dump_dir; fs::create_directories(dir);
+        for (size_t vi = 0; vi < gv.views.size(); vi++) {
+          if (gv.views[vi].masked) continue;
+          const ViewGPU& pv = gv.views[vi]; std::vector<uint32_t> px((size_t)pv.W * pv.H);
+          CUDA_CHECK(cudaMemcpyAsync(px.data(), aligned_views[vi].rgba, px.size() * 4, cudaMemcpyDeviceToHost, stream)); CUDA_CHECK(cudaStreamSynchronize(stream));
+          debug_writers.emplace_back([dir, name = names[vi], px = std::move(px), w = pv.W, h = pv.H]() {
+            stbi_write_png((dir / name).string().c_str(), w, h, 4, px.data(), w * 4); });
+        }
+        log_info("Alignment %u: wrote the warped frames to %s", it, cfg.align_dump_dir.c_str());
       }
       const float mean = (float)(mean_sum / std::max(n_align, 1)), p90 = (float)(p90_sum / std::max(n_align, 1));
       means.push_back(mean);

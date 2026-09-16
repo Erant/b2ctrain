@@ -16,7 +16,8 @@ __global__ void __launch_bounds__(RT_PX) probe_kernel(
   const bool inside = px < W && py < H;
   const float pcx = px + 0.5f, pcy = py + 0.5f;
   uint2 range = tile_ranges[tile];
-  float T = 1.f, z_first = INFINITY, deep = 0.f, behind = 0.f, zr = INFINITY;
+  float T = 1.f, z_first = INFINITY, deep = 0.f, behind = 0.f, zr = INFINITY, zsum = 0.f;
+  const bool mean_mode = tau <= 0.f;  // tau <= 0: z_first = alpha-weighted mean depth (expected depth) instead of the tau crossing
   if (inside && ref_z) zr = ref_z[py * W + px];
   bool done = !inside;
   for (uint32_t start = range.x; start < range.y; start += RT_PX) {
@@ -36,10 +37,12 @@ __global__ void __launch_bounds__(RT_PX) probe_kernel(
       float z = c.z;
       if (isfinite(z_first) && z > z_first + delta) deep += vis;
       if (z > zr + margin) behind += vis;
+      if (mean_mode) zsum += vis * z;
       T = next_T;
       if (!isfinite(z_first) && 1.f - T >= tau) z_first = z;
     }
   }
+  if (mean_mode) z_first = (1.f - T) > 0.05f ? zsum / (1.f - T) : INFINITY;
   if (inside) out[py * W + px] = make_float4(1.f - T, z_first, deep, behind);
 }
 }  // namespace

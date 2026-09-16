@@ -34,6 +34,9 @@ struct BodyRig {
   DevBuf<float3> pivots;               // [nj] the current view's moved pivots (fk scratch)
   // learnable per-view rotations (axis-angle, world axes) and their Adam moments, [nviews][nj]
   DevBuf<float3> omega, m_om, v_om;
+  // Seed rotations (--body-rig-init): omega starts there and the `zero` pull anchors to them instead of to 0, so a
+  // per-view pose fitted outside the trainer (the head from the frames' landmarks) is the prior the torque refines.
+  DevBuf<float3> omega0; bool has_init = false;   // [nviews][nj]
   DevBuf<float3> torque;               // [nj] scratch
   DevBuf<float3> g_pos;                // [cap] per-splat dL/d(posed mean), filled by the optimizer
   int adam_t = 0;
@@ -57,6 +60,8 @@ struct BodyRig {
   // the view's rotations with `lr` (radians) and a pull of `smooth` towards the mean of the two neighbouring views.
   // `zero`: pull towards no rotation; `global_v`: one second moment for all joints and views (evidence-weighted steps).
   void update(int v, const Model& m, float lr, float smooth, float zero, bool global_v, cudaStream_t stream);
+  // Seed the per-view rotations ([nviews][nj], world-axis axis-angle; entries of inactive joints are ignored).
+  void set_init(const std::vector<float3>& om0, cudaStream_t stream);
   // Host copy of omega [nviews][nj] and a summary for the log.
   std::vector<float3> download_omega(cudaStream_t stream) const;
   float mean_abs_torque = 0.f;          // last update's mean |torque| over active joints (host, when sampled)

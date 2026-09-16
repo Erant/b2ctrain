@@ -30,7 +30,7 @@ const char* HELP =
 "      --cameras <CAMERAS>      Camera list (body2colmap cameras.json)\n"
 "      --output-dir <DIR>       Where probe.json and the heat maps go [default: probe]\n"
 "      --every <N>              Probe every N-th camera [default: 1]\n"
-"      --tau <TAU>              Accumulated alpha that marks the first surface [default: 0.1]\n"
+"      --tau <TAU>              Accumulated alpha that marks the first surface; <= 0 = the alpha-weighted mean depth instead [default: 0.1]\n"
 "      --delta <DIST>           Weight arriving more than this behind the first surface counts as 'deep' (scene units) [default: 0.03]\n"
 "      --mesh <PATH>            Body proxy mesh; adds the 'behind' measure (weight from behind the mesh surface)\n"
 "      --points <COLMAP_DIR>    Instead of (or as well as) a mesh: the model's points3D.txt splatted as discs, as the trainer's fallback does\n"

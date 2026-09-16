@@ -1,5 +1,10 @@
 # b2ctrain: project state
 
+**2026-09-16 — meshification plan.** `docs/mesh-plan.md` is the implementation plan for moving the mesh chain (TSDF
+fusion, normal refinement, bake, xatlas unwrap, the two raster halves of the FLUX.2 klein texture-refinement loop) from
+the Python tools in `out/mesh/tools/` into `b2ctrain mesh-*` subcommands, with the klein loop itself as a b2crunner step.
+It opens with a "Start here" section listing the reference tools, venvs, subjects, assets and numbers. Not started.
+
 Last updated: 2026-09-11 (per-splat labels). Written for whoever (human or Claude) picks this up next.
 
 **2026-09-11 — `--export-labels`.** A `labels/` sidecar (8-bit class-id PNGs, one per training frame; point-sampled

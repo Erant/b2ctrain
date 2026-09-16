@@ -135,12 +135,16 @@ __global__ void torque_kernel(int n, const float4* __restrict__ pos_view, const 
 }
 
 __global__ void update_kernel(int nj, int nviews, int v, const int* __restrict__ active, const float3* __restrict__ torque,
-                              float3* __restrict__ omega, float3* __restrict__ m_om, float3* __restrict__ v_om, float lr, float smooth, float zero, bool global_v, int t) {
+                              float3* __restrict__ omega, const float3* __restrict__ omega0, float3* __restrict__ m_om, float3* __restrict__ v_om, float lr, float smooth, float zero, bool global_v, int t) {
   int j = blockIdx.x * blockDim.x + threadIdx.x;
   if (j >= nj || !active[j]) return;
   size_t idx = (size_t)v * nj + j;
   float3 w = omega[idx], g = torque[j];
-  if (zero > 0.f) { g.x += zero * w.x; g.y += zero * w.y; g.z += zero * w.z; }
+  if (zero > 0.f) {
+    // towards the seed when there is one (omega0 is null otherwise), else towards no rotation
+    float3 w0 = omega0 ? omega0[idx] : make_float3(0.f, 0.f, 0.f);
+    g.x += zero * (w.x - w0.x); g.y += zero * (w.y - w0.y); g.z += zero * (w.z - w0.z);
+  }
   if (smooth > 0.f && nviews > 2) {
     // the orbit closes on itself: the neighbours of the first view are the last and the second
     float3 a = omega[(size_t)((v + nviews - 1) % nviews) * nj + j], b = omega[(size_t)((v + 1) % nviews) * nj + j];
@@ -264,8 +268,16 @@ void BodyRig::update(int v, const Model& m, float lr, float smooth, float zero, 
   CUDA_KERNEL_CHECK();
   adam_t++;
   if (global_v) { global_moment_kernel<<<1, 32, 0, stream>>>(nj, active, torque, v_om); CUDA_KERNEL_CHECK(); }
-  update_kernel<<<div_up(nj, 128), 128, 0, stream>>>(nj, nviews, v, active, torque, omega, m_om, v_om, lr, smooth, zero, global_v, adam_t);
+  update_kernel<<<div_up(nj, 128), 128, 0, stream>>>(nj, nviews, v, active, torque, omega, has_init ? omega0.ptr : nullptr, m_om, v_om, lr, smooth, zero, global_v, adam_t);
   CUDA_KERNEL_CHECK();
+}
+
+void BodyRig::set_init(const std::vector<float3>& om0, cudaStream_t stream) {
+  if (om0.size() != (size_t)nviews * nj) throw std::runtime_error("body rig: seed rotations have the wrong size");
+  std::vector<float3> z = om0;
+  for (int v = 0; v < nviews; v++) for (int j = 0; j < nj; j++) if (!active_h[j]) z[(size_t)v * nj + j] = make_float3(0.f, 0.f, 0.f);
+  omega0.upload(z); omega.upload(z); has_init = true;
+  CUDA_CHECK(cudaStreamSynchronize(stream));
 }
 
 void BodyRig::sample_torque(cudaStream_t stream) {

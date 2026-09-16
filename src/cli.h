@@ -65,6 +65,7 @@ struct Config {
   uint32_t align_iters = 0, align_steps = 3000;
   std::vector<float> align_flow_sigma{6.f}, align_flow_cap{6.f};  // one entry, or one per iteration
   std::string align_debug_dir;
+  std::string align_dump_dir;  // every warped training frame of the last alignment iteration, as RGBA png
   std::string align_warp = "frames";  // frames: Lanczos-warp the pristine frames onto the render; render: move the projected splats onto the frames
   std::string backward = "tc";       // tc | warp
   // Hollow loss: a body proxy mesh (dataset's mesh.ply, or --mesh) gives every training pixel a reference surface
@@ -72,7 +73,9 @@ struct Config {
   // fragments in front is what pushes the front surface opaque.
   std::string mesh;                   // explicit mesh path (default: <dataset>/mesh.ply if present)
   std::string body_rig;               // per-view articulated deformation rig (gpu/deform.h), empty = off
+  std::string body_rig_init;          // seed rotations per view and joint (the layout of the exported body_rig_omega.json)
   uint32_t body_rig_start_iter = 1000;   // learn the per-view rotations from this iteration of the main run on
+  uint32_t body_rig_stop_iter = 0;       // ... and stop at this one (0 = never; they then keep learning through the alignment refits)
   float body_rig_lr = 2e-3f, body_rig_smooth = 0.05f, body_rig_zero = 0.02f;
   bool body_rig_global_moment = false;
   float hollow_weight = 0.f;          // 0 = off
