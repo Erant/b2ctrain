@@ -70,9 +70,14 @@ calls the overlap of the arm and the torso outside; that put a sheet 3 cm inside
 
 `meshify` (steps/meshify.py, the `export_mesh` output, off by default) runs the chain on the stage-2 splat with the
 refit body, the face cap and the Sapiens normal maps of the training frames; `refine_texture` (steps/refine_texture.py,
-the `refine_texture` setting, wan22 env) is the klein loop with `face_policy` deciding what it never repaints. The
-bake writes the cap's coverage as the ply's vertex alpha and the unwrap turns it into `protect_cap.png` (the
-point-footprint fallback needs the cap on the surface, which the prior face geometry does not give).
+the `refine_texture` setting, on by default behind `export_mesh`, wan22 env) is the klein loop with `face_policy`
+deciding what it never repaints. **Decided 2026-09-16: `protect_cap`** — the face stays the photograph's pixels (the
+cap's texels carry an infinite claim weight, so no view repaints them), klein sharpens the rest; `protect_head` and
+`none` stay as choices for an A/B. The bake writes the cap's coverage as the ply's vertex alpha and the unwrap turns
+it into `protect_cap.png` (the point-footprint fallback needs the cap on the surface, which the prior face geometry
+does not give). The deliverable lands twice under `mesh/`: `atlas/mesh_uv.obj` with the baked texture and
+`mesh_klein.obj` + `texture_final.png` with the refined one; the per-view renders, masks and repaints go to
+`debug/refine_texture/`.
 
 **The face policy (2026-09-16, `out/mesh/FACE_GUIDE.md`):** the face's shape reaches the mesh through the splat, not
 through `--protect`. b2crunner's `face_splat_refined` now builds the cap ON the SAM head's surface (`depth_prior:

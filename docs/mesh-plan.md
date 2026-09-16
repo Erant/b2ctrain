@@ -43,8 +43,9 @@ this plan has been committed to either repo; the Python tools are the reference,
    PLY/OBJ mesh IO (`dataset/mesh.cpp`), cameras JSON, PNG IO (stb), the rig (`gpu/deform.cu`, not needed here).
 3. **b2crunner owns orchestration and the ML models**: SAM-3D-Body, Sapiens normals, the cap, and the FLUX.2 klein
    texture refinement (diffusers). The klein loop's two raster halves are b2ctrain calls.
-4. **The face policy is a flag, decided on the pod A/B, not here**: protect the projected-photo cap (identity kept, a
-   sharpness step at the cap's edge) or let klein repaint the face (seamless, mild identity drift). Both are one mask.
+4. **The face policy is a flag**: protect the projected-photo cap (identity kept, a sharpness step at the cap's edge)
+   or let klein repaint the face (seamless, mild identity drift). Both are one mask. *Settled 2026-09-16 without the
+   pod: `protect_cap`, the face is the photograph's pixels (b2crunner `face_policy`).*
 
 ## The chain
 
