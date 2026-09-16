@@ -74,5 +74,14 @@ the `refine_texture` setting, wan22 env) is the klein loop with `face_policy` de
 bake writes the cap's coverage as the ply's vertex alpha and the unwrap turns it into `protect_cap.png` (the
 point-footprint fallback needs the cap on the surface, which the prior face geometry does not give).
 
+**The face policy (2026-09-16, `out/mesh/FACE_GUIDE.md`):** the face's shape reaches the mesh through the splat, not
+through `--protect`. b2crunner's `face_splat_refined` now builds the cap ON the SAM head's surface (`depth_prior:
+mesh_surface`, the port of `tools/sam_cap.py`), the stage-2 splat is trained with it, so its depth probes over the face
+are the SAM head's and `mesh-fuse` needs no protection; `mesh-refine --keep cap.ply 0.03` keeps that footprint at the
+fused positions (the normals would smooth a 90 px face away); `mesh-bake --project` paints the photograph through the
+same camera. `meshify`'s `face_geometry` defaults to `splat` accordingly; `prior` (`--protect`, the sgc3 recipe) stays
+an option for a splat trained with a pointmap-relief cap. The local run of the fixed chain is `out/mesh/tools/fix_chain.py`
++ `fix_chain.sh` (`out/mesh/fix/`).
+
 End to end (2026-09-16): `out/mesh/tools/b2c_arm.sh` built the pod pass-2 A/B's fourth arm (`out/mesh/ab2/ds_mesh_b2c`)
 from sgc3's inputs in ~6 minutes including the klein loop; the face sits 0.8 px from the photograph at the anchor.
