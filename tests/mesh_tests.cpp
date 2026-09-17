@@ -5,6 +5,7 @@
 #include "mesh/raster.h"
 #include "mesh/common.h"
 #include "mesh/mesh_main.h"
+#include "mesh/cap_color.h"
 #include "util/log.h"
 #include <filesystem>
 #include <random>
@@ -18,6 +19,34 @@ namespace fs = std::filesystem;
 namespace {
 
 int check(bool ok, const char* what) { printf("mesh: %s: %s\n", what, ok ? "ok" : "FAIL"); return ok ? 0 : 1; }
+
+int test_cap_color() {
+  const int W = 9, H = 9, N = W * H;
+  std::vector<float> rgb(3 * N, 0.f), cov(N, 0.f);
+  const float color[3] = {.72f, .43f, .26f};
+  // A constant foreground with varying opacity and a missing centre sample.
+  for (int y = 2; y <= 6; ++y) for (int x = 2; x <= 6; ++x) {
+    if (x == 4 && y == 4) continue;
+    int i = y * W + x;
+    cov[i] = .1f + .02f * i;
+    cov[i] = std::min(cov[i], 1.f);
+    for (int c = 0; c < 3; ++c) rgb[c * N + i] = color[c] * cov[i];
+  }
+  extend_cap_colors(rgb, cov, W, H);
+  float error = 0.f;
+  for (int i = 0; i < N; ++i) for (int c = 0; c < 3; ++c)
+    error = std::max(error, std::abs(rgb[c * N + i] - color[c]));
+  int fails = check(error < 1e-6f && cov[0] == 0.f && cov[4 * W + 4] > 0.f,
+                    "cap color: soft alpha and feather preserve constant foreground; extension adds no coverage");
+  rgb.assign(3 * N, 0.f); cov.assign(N, 0.f); cov[4 * W + 4] = .2f;
+  extend_cap_colors(rgb, cov, W, H);
+  fails += check(*std::max_element(rgb.begin(), rgb.end()) == 0.f && cov[4 * W + 4] == .2f && cov[4 * W + 5] < .2f,
+                 "cap color: observed black is valid and weak coverage is not promoted");
+  rgb.assign(3 * N, 0.f); cov.assign(N, 0.f);
+  extend_cap_colors(rgb, cov, W, H);
+  fails += check(*std::max_element(cov.begin(), cov.end()) == 0.f, "cap color: empty input stays empty");
+  return fails;
+}
 
 // A cube [-h, h]^3 with per-face vertices (24) and a colour per vertex.
 TriMesh make_cube(float h) {
@@ -231,6 +260,7 @@ int test_cube_round_trip() {
 
 int test_mesh() {
   int fails = 0;
+  fails += test_cap_color();
   fails += test_marching_cubes();
   fails += test_tsdf_sphere();
   fails += test_closest();

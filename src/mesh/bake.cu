@@ -5,6 +5,7 @@
 #include "mesh/common.h"
 #include "mesh/raster.h"
 #include "mesh/geom.cuh"
+#include "mesh/cap_color.h"
 #include "ply.h"
 #include "util/log.h"
 #include <cuda_fp16.h>
@@ -254,21 +255,7 @@ int mesh_bake_main(int argc, char** argv) {
       for (int ch = 0; ch < 3; ch++) img[(size_t)ch * Wc * Hc + (size_t)py * Wc + px] = std::min(std::max(0.5f + SH_C0 * cap.sh[(size_t)i * K * 3 + ch], 0.f), 1.f) * op;
       cov[(size_t)py * Wc + px] = op;
     }
-    // Holes inside the coverage: a 3x3 median of the neighbours; coverage set to the maximum.
-    float covmax = 0.f; for (float c : cov) covmax = std::max(covmax, c);
-    std::vector<float> img2 = img, cov2 = cov;
-    for (int y = 0; y < Hc; y++) for (int x = 0; x < Wc; x++) {
-      if (cov[(size_t)y * Wc + x] > 0.f) continue;
-      bool near = false; for (int dy = -1; dy <= 1 && !near; dy++) for (int dx = -1; dx <= 1 && !near; dx++) { int xx = x + dx, yy = y + dy; if (xx >= 0 && yy >= 0 && xx < Wc && yy < Hc && cov[(size_t)yy * Wc + xx] > 0.f) near = true; }
-      if (!near) continue;
-      for (int ch = 0; ch < 3; ch++) {
-        float vals[9]; int n = 0;
-        for (int dy = -1; dy <= 1; dy++) for (int dx = -1; dx <= 1; dx++) { int xx = std::min(std::max(x + dx, 0), Wc - 1), yy = std::min(std::max(y + dy, 0), Hc - 1); vals[n++] = std::round(img[(size_t)ch * Wc * Hc + (size_t)yy * Wc + xx] * 255.f) / 255.f; }
-        std::sort(vals, vals + 9); img2[(size_t)ch * Wc * Hc + (size_t)y * Wc + x] = vals[4];
-      }
-      cov2[(size_t)y * Wc + x] = covmax * 0.999f;
-    }
-    img.swap(img2); cov.swap(cov2);
+    extend_cap_colors(img, cov, Wc, Hc);
     // inside = erode(cov > 0.5, 3x3); soft = the Gaussian blur of it, kept at 1 inside.
     std::vector<float> inside((size_t)Wc * Hc, 0.f), soft((size_t)Wc * Hc, 0.f);
     for (int y = 0; y < Hc; y++) for (int x = 0; x < Wc; x++) {
