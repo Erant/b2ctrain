@@ -1,5 +1,8 @@
 # View-shaped texture atlas experiment
 
+> Production: b2crunner `pipeline/view_atlas.py` (torch, no open3d) inside `refine_texture --mode sheets`,
+> since b2crunner `2663a06`. The tools here are the open3d research version the port was verified against.
+
 `tools/view_atlas.py` builds a UV layout with large upright front/back panels and
 smaller left/right, crown and underside panels. It transfers the existing texture;
 it does not generate a new appearance. The output is real mesh UVs, so edits to the
