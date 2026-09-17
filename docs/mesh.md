@@ -88,5 +88,19 @@ same camera. `meshify`'s `face_geometry` defaults to `splat` accordingly; `prior
 an option for a splat trained with a pointmap-relief cap. The local run of the fixed chain is `out/mesh/tools/fix_chain.py`
 + `fix_chain.sh` (`out/mesh/fix/`).
 
+**The photograph in the texture (2026-09-16 night, b2crunner `photo_texture`, steps/photo_texture.py):** the bake's
+`--project` gave the face the photograph through a detour — the cap rasterised at the 720 x 1280 training camera (a
+155-row face as 92 x 116 px), projected onto the VERTICES (2 mm apart), interpolated into the 4096 px atlas by the
+unwrap, its tone swapped for the bake's by the levelling — and a grey rim from premultiplied cap colours (`478a069`:
+`cap_color.h` divides the opacity out, fills holes from observed neighbours only and extends the edge colour, not the
+coverage). b2crunner now samples every covered texel the photograph's own camera sees (the cap's camera: SAM-3D-Body's
+focal, the refinement's delta on the anchor, +0.5 for the renderer's pixel centres; visibility from `mesh-render
+--depth` at that camera) straight from the photograph, with a confidence field: Sapiens2's face classes at full
+confidence (klein never repaints them: `protect_photo.png` -> refine_texture's `protect_path`), skin and cloth fading
+in from cos 0.2 to 0.5, hair from 0.45 to 0.85, a soft foreground from the class map, and the bake around it shifted
+by a low-band (photo - bake) field diffused on a 1 cm world grid (two fields, hair's and skin's, picked by the bake's
+own colour) so the cheek runs into the side of the neck at one tone. `mesh-bake --project` stays as the base under it.
+Experiment and numbers: `out/mesh/photo/README.md`.
+
 End to end (2026-09-16): `out/mesh/tools/b2c_arm.sh` built the pod pass-2 A/B's fourth arm (`out/mesh/ab2/ds_mesh_b2c`)
 from sgc3's inputs in ~6 minutes including the klein loop; the face sits 0.8 px from the photograph at the anchor.
