@@ -12,6 +12,7 @@
 #include "reference.h"
 #include "gpu/align.h"
 #include "gpu/deform.h"
+#include "gpu/sparsify.h"
 #include "train/evidence.h"
 #include "cli.h"
 #include <cstdio>
@@ -292,6 +293,59 @@ static int test_labels() {
   return fails;
 }
 
+// GaussianSpa: the projection keeps the top `keep` of o + u and the dual accumulates o - z; compaction keeps order and
+// carries every per-splat buffer, the caller's extras included.
+static int test_sparsify() {
+  int fails = 0;
+  Scene s = make_scene(21, 200);
+  std::mt19937 rng(5); std::uniform_real_distribution<float> U(-4.f, 4.f);
+  for (size_t i = 0; i < s.cloud.n; i++) s.cloud.opacity[i] = U(rng);
+  Model model; model.upload(s.cloud);   // no floor attached: o = sigmoid(raw)
+  const int n = model.n;
+  std::vector<float> o(n); for (int i = 0; i < n; i++) o[i] = 1.f / (1.f + std::exp(-s.cloud.opacity[i]));
+  auto sorted_desc = [](std::vector<float> v) { std::sort(v.begin(), v.end(), std::greater<float>()); return v; };
+  Sparsifier spa; spa.begin(model, 0.7f, 0);
+  const uint32_t keep = (uint32_t)std::lround(0.3 * n);
+  if (spa.keep != keep) { fails++; printf("sparsify: keep %u, expected %u\n", spa.keep, keep); }
+  std::vector<float> z = spa.z.download(n), u = spa.u.download(n);
+  float cut = sorted_desc(o)[keep];
+  int nz = 0;
+  for (int i = 0; i < n; i++) {
+    float want = o[i] > cut ? o[i] : 0.f;
+    if (z[i] != 0.f) nz++;
+    if (std::abs(z[i] - want) > 1e-5f || u[i] != 0.f) { fails++; if (fails < 5) printf("sparsify begin: splat %d o %.5f z %.5f (want %.5f) u %.5f\n", i, o[i], z[i], want, u[i]); }
+  }
+  if (nz != (int)keep) { fails++; printf("sparsify begin: %d non-zero, expected %u\n", nz, keep); }
+  // begin leaves u = 0, so the first update projects o again (z unchanged) and sets u0 = o - z; the second one sees
+  // a non-zero dual: t = o + u0; z1 = top-k(t); u1 = u0 + o - z1.
+  spa.update(model, 0);
+  spa.update(model, 0);
+  std::vector<float> z1 = spa.z.download(n), u1 = spa.u.download(n), t(n);
+  for (int i = 0; i < n; i++) t[i] = o[i] + (o[i] - z[i]);
+  float cut1 = sorted_desc(t)[keep];
+  for (int i = 0; i < n; i++) {
+    float wz = t[i] > cut1 ? t[i] : 0.f, wu = (o[i] - z[i]) + o[i] - wz;
+    if (std::abs(z1[i] - wz) > 1e-5f || std::abs(u1[i] - wu) > 1e-5f) { fails++; if (fails < 5) printf("sparsify update: splat %d z %.5f (want %.5f) u %.5f (want %.5f)\n", i, z1[i], wz, u1[i], wu); }
+  }
+  // The final flags keep the top `keep` by o; compaction keeps them in order with their state.
+  uint32_t kept = spa.final_flags(model, 0);
+  if (kept != keep) { fails++; printf("sparsify final: %u flagged, expected %u\n", kept, keep); }
+  std::vector<uint32_t> fl = spa.flags.download(n);
+  model.compact(spa.flags, spa.state(), 0);
+  SplatCloud c = model.download(0);
+  std::vector<float> zc = spa.z.download(model.n);
+  int j = 0;
+  for (int i = 0; i < n; i++) {
+    if (!fl[i]) continue;
+    bool ok = j < model.n && c.pos[j * 3] == s.cloud.pos[i * 3] && c.opacity[j] == s.cloud.opacity[i] && c.sh[(size_t)j * c.K() * 3 + 4] == s.cloud.sh[(size_t)i * c.K() * 3 + 4] && zc[j] == z1[i];
+    if (!ok) { fails++; if (fails < 8) printf("compact: slot %d does not hold splat %d\n", j, i); }
+    j++;
+  }
+  if (model.n != (int)kept || j != model.n) { fails++; printf("compact: n %d, expected %u\n", model.n, kept); }
+  printf("sparsify: keep %u of %d, projection/dual/compaction %s\n", keep, n, fails ? "FAILED" : "ok");
+  return fails;
+}
+
 int test_mesh();
 
 int main(int argc, char** argv) {
@@ -299,6 +353,7 @@ int main(int argc, char** argv) {
   if (mesh_fails) printf("mesh: %d failure(s)\n", mesh_fails);
   int align_fails = test_align();
   int deform_fails = test_deform();
+  int sparsify_fails = test_sparsify();
   if (deform_fails) printf("deform: %d failure(s)\n", deform_fails);
   if (argc > 1) g_eps = (float)atof(argv[1]);
   int fails = 0, total = 0, skipped = 0;
@@ -349,5 +404,6 @@ int main(int argc, char** argv) {
   printf("%d / %d mismatches (%d non-smooth points skipped)\n", fails, total, skipped);
   fails += test_labels();
   if (align_fails) printf("%d alignment test failure(s)\n", align_fails);
-  return (fails == 0 && align_fails == 0 && deform_fails == 0 && mesh_fails == 0) ? 0 : 1;
+  if (sparsify_fails) printf("sparsify: %d failure(s)\n", sparsify_fails);
+  return (fails == 0 && align_fails == 0 && deform_fails == 0 && mesh_fails == 0 && sparsify_fails == 0) ? 0 : 1;
 }

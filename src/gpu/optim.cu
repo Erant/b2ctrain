@@ -130,7 +130,8 @@ __global__ void __launch_bounds__(128) optim_kernel(
 #pragma unroll
   for (int k = 0; k < (int)GRAD_LANES; k++) finite = finite && isfinite(g[k]);
   if (!finite) any = false;
-  if (op.sparse && !any) return;
+  const bool spa = op.spa_z != nullptr;
+  if (op.sparse && !any && !spa) return;
   // Lazy sparse Adam: catch up on the steps skipped while invisible. With zero gradient the dense update would have
   // decayed the moments and applied a geometric series of momentum steps; both have closed forms (bias corrections and
   // the mean LR treated as constant over the gap).
@@ -247,6 +248,15 @@ __global__ void __launch_bounds__(128) optim_kernel(
     }
   }
 
+  if (spa) {
+    // d/d(raw) of 0.5 rho (o - z + u)^2 with o = sigmoid(raw) * floor compensation (the scales' share is not taken).
+    float sig = sigmoidf_(po.w);
+    float f2 = ls.w * ls.w;
+    float3 s2 = make_float3(__expf(2.f * ls.x), __expf(2.f * ls.y), __expf(2.f * ls.z));
+    float comp = ls.w > 0.f ? sqrtf((s2.x * s2.y * s2.z) / ((s2.x + f2) * (s2.y + f2) * (s2.z + f2))) : 1.f;
+    float gs = op.spa_rho * (sig * comp - op.spa_z[i] + op.spa_u[i]) * comp * sig * (1.f - sig);
+    if (isfinite(gs)) g_op += gs;
+  }
   if (op.g_pos_out) op.g_pos_out[i] = g_pos;
   if (op.grad_out) {
     float* o = op.grad_out + (size_t)i * (11 + K * 3);

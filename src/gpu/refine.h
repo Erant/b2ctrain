@@ -13,6 +13,7 @@ struct RefineParams {
   float split_at_screen_size = 0.5f;
   float opac_decay = 0.004f;
   uint32_t seed = 42;
+  bool no_new = false;   // sparsification: no relocation, no splits, no growth; dead splats are killed and `keep` says which
 };
 struct RefineStats { int pruned = 0, relocated = 0, grown = 0, split_oversized = 0; };
 

@@ -84,6 +84,11 @@ struct Config {
   uint32_t hollow_start_iter = 0;     // first iteration the loss is applied
   std::string hollow_proxy = "auto"; // auto: mesh if present, else discs on points3D; mesh; points
   float hollow_points_radius = 0.f;   // surfel radius for the points proxy, 0 = 4x the median point spacing
+  // GaussianSpa sparsification (gpu/sparsify.h): 0 = off, else the fraction of the splats alive at the start to remove.
+  float sparsify = 0.f;
+  uint32_t sparsify_start_iter = 15000, sparsify_stop_iter = 25000, sparsify_every = 50, sparsify_score_every = 500;
+  float sparsify_rho = 5e-4f;
+  std::string sparsify_score = "opacity";  // opacity | importance
   int device = 0;
   std::string checkpoint_dir;         // debug dumps
   bool help = false;

@@ -46,6 +46,7 @@ add_library(b2c_core STATIC
   src/gpu/optim.cu
   src/gpu/deform.cu
   src/gpu/refine.cu
+  src/gpu/sparsify.cu
   src/gpu/images.cu
   src/gpu/align.cu
   src/gpu/meshdepth.cu

@@ -231,6 +231,8 @@ void compute_evidence(RenderCtx& ctx, const Model& m, const std::vector<ViewGPU>
   CUDA_CHECK(cudaStreamSynchronize(stream));
 }
 
+const float* evidence_device(int* stride) { *stride = EV_ACC; return g_evidence.ptr; }
+
 std::vector<float> download_evidence(const Model& m, cudaStream_t stream) {
   std::vector<float> out((size_t)m.n * 7, 0.f);
   if (g_evidence.count < (size_t)m.n * EV_ACC) return out;

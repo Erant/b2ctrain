@@ -40,6 +40,17 @@
 7. Every `refine_every` steps `RefineState::run` prunes, relocates dead slots and grows by Gumbel-top-k weighted sampling
    (equivalent in distribution to brush's multinomial without replacement), splits with brush's covariance-aware rule,
    decays opacity, recomputes the 80th-percentile bounds and the floor on the GPU.
+8. `--sparsify RATIO` (off by default; `src/gpu/sparsify.cu`) ports GaussianSpa (CVPR 2025): from
+   `--sparsify-start-iter` to `--sparsify-stop-iter`, every `--sparsify-every` steps, the optimizer adds the gradient of
+   `0.5 rho (o - z + u)^2` to every splat's opacity logit (o = sigmoid x floor compensation), then `z` is re-projected
+   onto the top `(1 - RATIO) x n_start` of `o + u` (or of the importance score: `w_all` of the evidence replay, the
+   Mini-Splatting variant) and `u += o - z`. At the stop the rest is removed. From the start on, refine runs with
+   `no_new` (no relocation, no oversized splits) and the dead are compacted away (`Model::compact`) instead of
+   relocated, so the count only falls. Opt-in only, not wired into b2crunner. Measured 2026-09-24 on the
+   helical-20260922-225300-ba9915 bundle's colmap/ (pod final-stage argv minus mesh/rig, 4 alignment refits), vs
+   307k splats / 145 s / 33.60 dB train-view PSNR: 0.5 -> 152k, 119 s, 33.35 dB, off-orbit Laplacian sharpness -6%;
+   0.7 -> 92k, 109 s, 33.07 dB, -13%; importance 0.6 -> 122k, 116 s, 33.24 dB, -9%. Torso detail is unchanged by eye,
+   the face softens slightly at 0.7. Worth it only if ply size or viewer cost becomes a goal.
 
 ## Alignment loop (`src/gpu/align.cu`, `--align-iters`)
 b2crunner's stage-5 loop — render the training views, DIS-flow each pristine frame onto its render, smooth (sigma 6 px),

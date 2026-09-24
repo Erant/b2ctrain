@@ -21,6 +21,8 @@ struct OptimParams {
   const float4* pos_override = nullptr;
   float3* g_pos_out = nullptr;   // when set, receives dL/d(mean) per splat (zeros for invisible ones) and the update proceeds
   bool sparse = false;       // skip Adam for splats without gradient
+  // GaussianSpa's opacity penalty 0.5 * rho * (o - z + u)^2 on every splat, visible or not (gpu/sparsify.h); null = off.
+  const float* spa_z = nullptr; const float* spa_u = nullptr; float spa_rho = 0.f;
   float* grad_out = nullptr; // debug: write parameter gradients [n][11 + K*3] (pos3, opac, quat4, lscale3, sh) and skip the update
 };
 

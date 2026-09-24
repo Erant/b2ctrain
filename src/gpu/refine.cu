@@ -262,7 +262,7 @@ RefineStats RefineState::run(Model& m, RenderCtx& ctx, const RefineParams& p, cu
   selected.zero(stream, nn);
   uint32_t n_sel = 0;
   // 2a. Relocation of dead slots: sample n_dead survivors weighted by opacity * visible.
-  if (n_dead > 0 && alive > 0) {
+  if (n_dead > 0 && alive > 0 && !p.no_new) {
     gumbel_keys_kernel<<<div_up(n, 256), 256, 0, stream>>>(n, keep, nullptr, m.pos_op, m.lscale, m.vis_count, m.refine_norm, 0, 0.f, p.seed ^ (p.iter * 2654435761u), keys, vals, nullptr);
     CUDA_KERNEL_CHECK();
     sort_keys(*this, n, stream);
@@ -272,7 +272,7 @@ RefineStats RefineState::run(Model& m, RenderCtx& ctx, const RefineParams& p, cu
     n_sel = take; stats.relocated = (int)take;
   }
   // 2b. Oversized splits (every refine), capped by headroom.
-  if (p.split_at_screen_size > 0.f) {
+  if (p.split_at_screen_size > 0.f && !p.no_new) {
     oversized_flags_kernel<<<div_up(n, 256), 256, 0, stream>>>(n, keep, selected, m.max_screen, m.vis_count, p.split_at_screen_size, above);
     CUDA_KERNEL_CHECK();
     uint32_t n_over = select_flagged(*this, above, n, tmp_idx, stream);
@@ -285,7 +285,7 @@ RefineStats RefineState::run(Model& m, RenderCtx& ctx, const RefineParams& p, cu
     n_sel += n_over; stats.split_oversized = (int)n_over;
   }
   // 2c. Gradient-driven growth.
-  if (p.growth_allowed) {
+  if (p.growth_allowed && !p.no_new) {
     gumbel_keys_kernel<<<div_up(n, 256), 256, 0, stream>>>(n, keep, selected, m.pos_op, m.lscale, m.vis_count, m.refine_norm, 1, p.growth_grad_threshold, p.seed ^ (p.iter * 40503u), keys, vals, above);
     CUDA_KERNEL_CHECK();
     uint32_t n_above = count_flags(*this, above, n, stream);

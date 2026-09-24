@@ -5,6 +5,7 @@
 #include "gpu/loss.h"
 #include "gpu/optim.h"
 #include "gpu/refine.h"
+#include "gpu/sparsify.h"
 #include "gpu/align.h"
 #include "gpu/deform.h"
 #include "gpu/meshdepth.h"
@@ -70,6 +71,7 @@ struct Phase {
   const std::vector<ViewGPU>* views = nullptr;   // full-resolution views to train on
   bool refine = false, normals = false, res_schedule = false, exports = false, evals = false;
   bool hollow = false;                            // apply the hollow loss (needs a mesh)
+  bool sparsify = false;                          // run the GaussianSpa phase (--sparsify)
   bool rig_learn_from_start = false;              // refits: the per-view rotations keep learning from their first step
   uint32_t growth_stop = 0;
   std::string label;                              // prefix for the progress line ("" for the main run)
@@ -145,6 +147,20 @@ int train_main(const Config& cfg) {
   }
   const bool hollow_on = cfg.hollow_weight > 0.f && have_mesh;
 
+  // GaussianSpa sparsification (gpu/sparsify.h).
+  const bool sparsify_on = cfg.sparsify > 0.f;
+  Sparsifier spa; bool spa_done = false; uint32_t spa_scored = 0;  // iteration of the last importance refresh
+  if (sparsify_on) {
+    if (!(cfg.sparsify < 1.f)) fail("--sparsify %g: expected a fraction in (0, 1)", cfg.sparsify);
+    if (cfg.sparsify_score != "opacity" && cfg.sparsify_score != "importance") fail("invalid --sparsify-score '%s' [possible values: opacity, importance]", cfg.sparsify_score.c_str());
+    if (cfg.sparsify_start_iter < growth_stop) fail("--sparsify-start-iter %u is before growth stops (%u): growth would refill what the phase removes; move the start or --growth-stop-iter", cfg.sparsify_start_iter, growth_stop);
+    if (cfg.sparsify_stop_iter <= cfg.sparsify_start_iter || cfg.sparsify_stop_iter > total) fail("--sparsify-stop-iter %u must be after --sparsify-start-iter %u and at most --total-train-iters %u", cfg.sparsify_stop_iter, cfg.sparsify_start_iter, total);
+    if (cfg.sparsify_every == 0 || cfg.sparsify_score_every == 0) fail("--sparsify-every and --sparsify-score-every must be at least 1");
+    spa.rho = cfg.sparsify_rho; spa.by_importance = cfg.sparsify_score == "importance";
+    log_info("Sparsification on: remove %.0f%% of the splats from iteration %u to %u, ranked by %s, rho %g every %u steps; relocation and oversized splits off from the start",
+             100.f * cfg.sparsify, cfg.sparsify_start_iter, cfg.sparsify_stop_iter, cfg.sparsify_score.c_str(), cfg.sparsify_rho, cfg.sparsify_every);
+  }
+
   StageTimer timer; timer.enabled = cfg.bench; timer.init();
   // Articulated per-view deformation (gpu/deform.h).
   BodyRig rig; bool have_rig = false;
@@ -192,6 +208,17 @@ int train_main(const Config& cfg) {
     if (!have_rig || vi < 0 || rig_view[vi] < 0) return;
     rig.pose(rig_view[vi], model, stream); rp.pos_override = rig.pos_view;
     if (have_mesh && mesh.nv > 0) rig.pose_points(rig_view[vi], mesh_canon, mesh_bj, mesh_bw, mesh_bv, mesh.nv, mesh.v, stream);
+  };
+
+  // The importance score: every training view rendered and each splat's blending weight summed (the evidence replay's w_all).
+  auto refresh_importance = [&]() {
+    double t = now_seconds();
+    Config ecfg = cfg; ecfg.export_labels = false; ecfg.evidence_normal_weight = 0.f;
+    compute_evidence(ctx, model, gv.views, gv.cams, ecfg, stream, have_rig ? &rig : nullptr, &rig_view);
+    int stride = 0; const float* acc = evidence_device(&stride);
+    spa.set_importance(acc, stride, 1, model, stream);
+    CUDA_CHECK(cudaStreamSynchronize(stream));
+    return now_seconds() - t;
   };
 
   PinnedBuf<float> h_loss; h_loss.reserve(16);
@@ -307,8 +334,32 @@ int train_main(const Config& cfg) {
       op.lr_rot = cfg.lr_rotation; op.lr_scale = cfg.lr_scale; op.lr_opac = cfg.lr_opac; op.lr_dc = cfg.lr_coeffs_dc; op.lr_sh_rest = cfg.lr_coeffs_dc / cfg.lr_coeffs_sh_scale;
       op.noise_weight = op.lr_mean * cfg.mean_noise_weight; op.noise_clamp = median_scale;
       op.seed = (uint32_t)cfg.seed; op.step = step; op.sparse = cfg.sparse_adam || cfg.recipe == Recipe::Fast;
+      // GaussianSpa applies the penalty on the sparsifying steps only, then re-projects z and updates u.
+      const bool spa_step = ph.sparsify && spa.active && step > cfg.sparsify_start_iter && step <= cfg.sparsify_stop_iter && step % cfg.sparsify_every == 0;
+      if (spa_step) { op.spa_z = spa.z; op.spa_u = spa.u; op.spa_rho = spa.rho; }
       optimizer_step(ctx, model, op, stream);
       timer.mark("optim", stream);
+      if (ph.sparsify && !spa_done) {
+        if (!spa.active && step >= cfg.sparsify_start_iter) {
+          double ts = spa.by_importance ? refresh_importance() : 0.0; spa_scored = step;
+          spa.begin(model, cfg.sparsify, stream);
+          log_info("Sparsify start (iter %u): %d splats, keeping %u%s", step, model.n, spa.keep, spa.by_importance ? format(" (importance over %zu views in %.2fs)", gv.views.size(), ts).c_str() : "");
+        } else if (spa_step) {
+          if (spa.by_importance && step - spa_scored >= cfg.sparsify_score_every) { refresh_importance(); spa_scored = step; }
+          spa.update(model, stream);
+        }
+        if (spa.active && step >= cfg.sparsify_stop_iter) {
+          if (spa.by_importance) refresh_importance();
+          const int before = model.n;
+          const uint32_t kept = spa.final_flags(model, stream);
+          model.compact(spa.flags, {}, stream);
+          spa.active = false; spa_done = true;
+          refine.update_bounds(model, stream); bounds = refine.bounds; median_scale = bounds.median_size();
+          if (have_rig) rig.bind(model, stream);
+          log_info("Sparsify stop (iter %u): %d -> %u splats", step, before, kept);
+        }
+        timer.mark("sparsify", stream);
+      }
       if (rig_learn) {
         rig.update(rig_view[vi], model, cfg.body_rig_lr, cfg.body_rig_smooth, cfg.body_rig_zero, cfg.body_rig_global_moment, stream);
         if (rig.adam_t == 1 || rig.adam_t % 5000 == 0) {
@@ -326,7 +377,13 @@ int train_main(const Config& cfg) {
         rpar.iter = step; rpar.total = ph_total; rpar.growth_allowed = step < ph.growth_stop;
         rpar.max_splats = cfg.max_splats; rpar.growth_grad_threshold = cfg.growth_grad_threshold; rpar.growth_select_fraction = cfg.growth_select_fraction;
         rpar.split_at_screen_size = cfg.split_at_screen_size; rpar.opac_decay = cfg.opac_decay; rpar.seed = (uint32_t)cfg.seed;
+        rpar.no_new = ph.sparsify && (spa.active || spa_done);
         RefineStats rs = refine.run(model, ctx, rpar, stream);
+        if (rpar.no_new && rs.pruned > 0) {
+          // The dead are killed, not relocated: drop them (and their z, u, score while the phase runs).
+          model.compact(refine.keep, spa.active ? spa.state() : std::vector<DevBuf<float>*>{}, stream);
+          refine.update_bounds(model, stream);
+        }
         if (model.cap > (int)ctx.tile_count.count) ctx.setup(ctx.W, ctx.H, model.cap, stream);
         bounds = refine.bounds; median_scale = bounds.median_size();
         if (have_rig) rig.bind(model, stream);  // new and moved splats take the binding of their nearest rig vertex
@@ -379,6 +436,7 @@ int train_main(const Config& cfg) {
     main.total = total; main.start = cfg.start_iter; main.views = &gv.views;
     main.refine = true; main.normals = true; main.res_schedule = res_schedule; main.exports = true; main.evals = true; main.growth_stop = growth_stop;
     main.hollow = hollow_on;
+    main.sparsify = sparsify_on;
     double train_time = train_phase(main);
     log_info("Training took %s (%.1f it/s)", format_duration(train_time).c_str(), (total - cfg.start_iter) / std::max(train_time, 1e-9));
   }

@@ -1,6 +1,7 @@
 #pragma once
 #include "gpu/util.cuh"
 #include "ply.h"
+#include <vector>
 
 namespace b2c {
 
@@ -32,6 +33,9 @@ struct Model {
   SplatCloud download(cudaStream_t stream = 0) const;
   void zero_optimizer(cudaStream_t stream = 0);
   void zero_stats(cudaStream_t stream = 0);
+  // Drop the splats whose keep flag [n] is 0, preserving order; parameters, Adam moments and statistics move with
+  // their splat. `extras` are per-splat float buffers of the caller's, gathered the same way. Returns the new n.
+  int compact(const uint32_t* keep, const std::vector<DevBuf<float>*>& extras = {}, cudaStream_t stream = 0);
 };
 
 }  // namespace b2c

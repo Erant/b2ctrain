@@ -1,4 +1,6 @@
 #include "model.h"
+#include <cub/cub.cuh>
+#include <thrust/iterator/counting_iterator.h>
 #include <type_traits>
 
 namespace b2c {
@@ -104,5 +106,52 @@ void Model::zero_optimizer(cudaStream_t stream) {
   m_sh_dc.zero(stream); m_sh_hi.zero(stream); m_sh_hi32.zero(stream); v_sh.zero(stream); adam_t = 0; last_step.zero(stream);
 }
 void Model::zero_stats(cudaStream_t stream) { refine_norm.zero(stream); max_screen.zero(stream); vis_count.zero(stream); }
+
+namespace {
+// dst[l * stride + j] = src[l * stride + idx[j]] for every lane l.
+template <typename T>
+__global__ void gather_kernel(int count, int lanes, size_t stride, const uint32_t* __restrict__ idx, const T* __restrict__ src, T* __restrict__ dst) {
+  int j = blockIdx.x * blockDim.x + threadIdx.x;
+  if (j >= count) return;
+  uint32_t i = idx[j];
+  for (int l = 0; l < lanes; l++) dst[(size_t)l * stride + j] = src[(size_t)l * stride + i];
+}
+}  // namespace
+
+int Model::compact(const uint32_t* keep, const std::vector<DevBuf<float>*>& extras, cudaStream_t stream) {
+  if (n == 0) return 0;
+  DevBuf<uint32_t> idx, cnt; idx.reserve((size_t)n); cnt.reserve(1);
+  DevBuf<unsigned char> tmp;
+  thrust::counting_iterator<uint32_t> it(0);
+  size_t tmp_bytes = 0;
+  cub::DeviceSelect::Flagged(nullptr, tmp_bytes, it, keep, idx.ptr, cnt.ptr, n, stream);
+  tmp.reserve(tmp_bytes);
+  cub::DeviceSelect::Flagged(tmp.ptr, tmp_bytes, it, keep, idx.ptr, cnt.ptr, n, stream);
+  uint32_t kept = 0;
+  CUDA_CHECK(cudaMemcpyAsync(&kept, cnt.ptr, sizeof(uint32_t), cudaMemcpyDeviceToHost, stream));
+  CUDA_CHECK(cudaStreamSynchronize(stream));
+  if ((int)kept == n) return n;
+  const int K = this->K(), hi_lanes = (K - 1) * 3;
+  // Gathered into a fresh buffer of the same capacity (an in-place gather would race), which then replaces the old.
+  auto gather = [&](auto& b, int lanes) {
+    using T = std::remove_reference_t<decltype(*b.ptr)>;
+    if (!b.ptr || lanes == 0) return;
+    DevBuf<T> nb; nb.reserve(b.count); nb.zero(stream);
+    if (kept) gather_kernel<T><<<div_up((int)kept, 256), 256, 0, stream>>>((int)kept, lanes, (size_t)cap, idx.ptr, b.ptr, nb.ptr);
+    CUDA_KERNEL_CHECK();
+    CUDA_CHECK(cudaStreamSynchronize(stream));
+    b = std::move(nb);
+  };
+  gather(pos_op, 1); gather(quat, 1); gather(lscale, 1); gather(sh_dc, 3);
+  if (sh_fp16) gather(sh_hi, hi_lanes); else gather(sh_hi32, hi_lanes);
+  gather(m_pos_op, 1); gather(v_pos_op, 1); gather(m_quat, 1); gather(v_quat, 1); gather(m_lscale, 1); gather(v_lscale, 1);
+  gather(m_sh_dc, 3);
+  if (sh_fp16) gather(m_sh_hi, hi_lanes); else gather(m_sh_hi32, hi_lanes);
+  gather(v_sh, 1);
+  gather(refine_norm, 1); gather(max_screen, 1); gather(vis_count, 1); gather(last_step, 1);
+  for (DevBuf<float>* e : extras) gather(*e, 1);
+  n = (int)kept;
+  return n;
+}
 
 }  // namespace b2c
