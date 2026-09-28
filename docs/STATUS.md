@@ -731,6 +731,17 @@ closed-eye detection is not attempted; an eye pasted onto a dark hand in front o
 (occlusion from the posed body is the proper fix); the texture comes from a 90 px-wide face (iris ~9 px), the same
 scale as the frames' eyes, so it is not the resolution bottleneck.
 
+### Random training background; normals back on the final training (2026-09-28)
+
+The dark streaks on top of raised arms seen from above are background splats: transparent frames are trained
+against a near-black background (`--background-color 0,0,0`, noise 0.1) with match-alpha 0.1, and at the arm tops
+— silhouette edges in every orbit view — an opaque dark splat fits "skin blended into black" as well as a
+semi-transparent skin one. `--background-color 0.5,0.5,0.5 --background-noise-strength 0.5` removes them.
+Normals (Sapiens2 1b, 0.05 from 5000) halve the arm splats sitting off the body; they add ~150k splats with the
+random background, and at `--growth-grad-threshold 0.0035` the count is back to the no-normals one with the
+placement benefit intact (and ~3% softer). b2crunner's final training uses all three. Write-up and the
+bundle-rebuild tools: [random-background.md](random-background.md), `tools/bundle_study/`.
+
 ## What's left
 
 - **Commit the b2crunner side.** Its working tree (`~/Projects/b2crunner`) has uncommitted changes from this work in
@@ -768,6 +779,8 @@ bench/                  eval_ply.py (mask-weighted PSNR/SSIM), colmap_to_cameras
 docker/                 Dockerfile stage (reference copy; the live one is in b2crunner) + brush-splat-render shim
 docs/design.md          kernel-level architecture notes and the numbers table
 docs/STATUS.md          this file
+docs/random-background.md  the training background and normals-at-equal-count study (2026-09-28)
+tools/bundle_study/     rebuild a b2crunner bundle's final training and re-run it with variants; blotch diagnosis
 ```
 
 ## How to reproduce the numbers
