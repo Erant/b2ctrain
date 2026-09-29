@@ -28,6 +28,10 @@ cmake --build build
 - Optimizer: fused projection backward + Adam (brush's constants, Adam-mini second moment for SH) + MCMC noise.
 - Refinement: brush's recipe on the GPU (prune, relocation and growth by Gumbel-top-k weighted sampling, covariance-aware
   split, opacity decay, Mip-Splatting 3D filter floor).
+- Visibility cull (`--cull-weight`, `--cull-no-relocate`, `--evidence-prune-wall`): splats whose rendered mass over a
+  refine window is below a threshold are pruned at every refine, the alignment refits included, and the final export
+  drops what no training view renders. Measured in `docs/unsupported-splats-2026-09-28.md`: never-seen opaque
+  splats 47k -> 0 at equal PSNR, 46% fewer splats.
 - Evidence export (`--export-evidence`, `--evidence-prune-inmask`, `--evidence-normal-weight`) and confidence-gated
   rendering (`b2ctrain render --confidence ...`) matching brush-splat-render's output contract. `ev_views` is an
   effective (participation-ratio) view count rather than brush's thresholded one; see `src/train/evidence.cu`.

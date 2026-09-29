@@ -34,7 +34,7 @@ __global__ void __launch_bounds__(RT_PX) raster_bwd_tc_kernel(
     const float4* __restrict__ v_out, const float4* __restrict__ v_feat_in,
     int W, int H, int tiles_x, float3 bg, float inv_gscale,
     const float* __restrict__ hollow_z, float hollow_margin, float hollow_lam,
-    float* __restrict__ v_splat, uint32_t* __restrict__ vis_flag) {
+    float* __restrict__ v_splat, uint32_t* __restrict__ vis_flag, float* __restrict__ vis_weight) {
   extern __shared__ __align__(128) unsigned char smem[];
   __half* A = (__half*)smem;                                   // [NTYPES][GROUP][RT_PX]
   __half* Bm = (__half*)(smem + SmemLayout::A);                // [RT_PX][NB]
@@ -192,6 +192,7 @@ __global__ void __launch_bounds__(RT_PX) raster_bwd_tc_kernel(
           g[9] = Cv(3, 6) * (1.f / R_SCALE);
           uint32_t gid = s_gid[sj];
           vis_flag[gid] = 1u;
+          atomicAdd(vis_weight + gid, sum_vis);
           float* dst = v_splat + (size_t)gid * GRAD_LANES;
 #pragma unroll
           for (int k = 0; k < (int)GRAD_LANES; k++) { float val = g[k] * inv_gscale; if (val != 0.f) atomicAdd(dst + k, val); }
@@ -215,7 +216,7 @@ void rasterize_backward_tc(RenderCtx& ctx, const Model& m, const RenderParams& p
   const float lam = p.hollow_lam * grad_scale;
 #define L(F, HO, slot) do { \
     if (!g_attr_set[slot]) { CUDA_CHECK(cudaFuncSetAttribute(raster_bwd_tc_kernel<F, HO>, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem)); g_attr_set[slot] = true; } \
-    raster_bwd_tc_kernel<F, HO><<<grid, block, smem, stream>>>(ctx.tile_ranges, ctx.vals_sorted, ctx.proj0, ctx.proj1, ctx.proj2, ctx.proj3, ctx.out_rgba, ctx.out_feat, ctx.last_idx, ctx.v_out, ctx.v_feat, ctx.W, ctx.H, ctx.tiles_x, bg, inv, p.hollow_z, p.hollow_margin, lam, ctx.v_splat, ctx.vis_flag); \
+    raster_bwd_tc_kernel<F, HO><<<grid, block, smem, stream>>>(ctx.tile_ranges, ctx.vals_sorted, ctx.proj0, ctx.proj1, ctx.proj2, ctx.proj3, ctx.out_rgba, ctx.out_feat, ctx.last_idx, ctx.v_out, ctx.v_feat, ctx.W, ctx.H, ctx.tiles_x, bg, inv, p.hollow_z, p.hollow_margin, lam, ctx.v_splat, ctx.vis_flag, m.vis_weight.ptr); \
   } while (0)
   if (feat) { if (hollow) L(true, true, 3); else L(true, false, 1); }
   else { if (hollow) L(false, true, 2); else L(false, false, 0); }

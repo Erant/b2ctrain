@@ -13,6 +13,7 @@
 #include "gpu/align.h"
 #include "gpu/deform.h"
 #include "gpu/sparsify.h"
+#include "gpu/refine.h"
 #include "train/evidence.h"
 #include "cli.h"
 #include <cstdio>
@@ -346,6 +347,37 @@ static int test_sparsify() {
   return fails;
 }
 
+// The visibility cull: a splat whose rendered mass over the refine window (Model::vis_weight, summed by the backward)
+// is under RefineParams::cull_weight is pruned like an opacity-dead one; with no_new the caller's compaction drops it.
+static int test_cull() {
+  int fails = 0;
+  Scene s = make_scene(31, 40);
+  for (size_t i = 0; i < s.cloud.n; i++) s.cloud.opacity[i] = 1.f;   // every splat alive by opacity (sigmoid 0.73)
+  Model model; model.upload(s.cloud);
+  const int n = model.n;
+  std::vector<float> vw(n); for (int i = 0; i < n; i++) vw[i] = (i % 3 == 0) ? 0.2f : 3.f + (float)i;
+  model.vis_weight.upload(vw);
+  RenderCtx ctx; ctx.setup(s.W, s.H, model.cap, 0);
+  RefineState refine; refine.init(model, 0);
+  RefineParams p; p.iter = 100; p.total = 1000; p.growth_allowed = false; p.no_new = true; p.opac_decay = 0.f; p.split_at_screen_size = 0.f;
+  RefineStats off = refine.run(model, ctx, p, 0);   // cull_weight 0: nothing to prune
+  if (off.pruned != 0 || off.culled != 0) { fails++; printf("cull off: pruned %d culled %d, expected 0\n", off.pruned, off.culled); }
+  model.vis_weight.upload(vw);   // run() zeroes the statistics
+  p.cull_weight = 1.f;
+  RefineStats st = refine.run(model, ctx, p, 0);
+  int expect = 0; for (int i = 0; i < n; i++) expect += (i % 3 == 0);
+  if (st.culled != expect || st.pruned != expect) { fails++; printf("cull: culled %d pruned %d, expected %d\n", st.culled, st.pruned, expect); }
+  std::vector<uint32_t> keep = refine.keep.download(n);
+  for (int i = 0; i < n; i++) if ((keep[i] != 0u) != (i % 3 != 0)) { fails++; if (fails < 5) printf("cull: splat %d keep %u\n", i, keep[i]); }
+  model.compact(refine.keep, {}, 0);
+  SplatCloud c = model.download(0);
+  if (model.n != n - expect) { fails++; printf("cull: %d splats after compaction, expected %d\n", model.n, n - expect); }
+  int j = 0;
+  for (int i = 0; i < n && j < model.n; i++) { if (i % 3 == 0) continue; if (c.pos[j * 3] != s.cloud.pos[i * 3]) { fails++; if (fails < 8) printf("cull: slot %d does not hold splat %d\n", j, i); } j++; }
+  printf("cull: %d of %d culled, compaction %s\n", expect, n, fails ? "FAILED" : "ok");
+  return fails;
+}
+
 int test_mesh();
 
 int main(int argc, char** argv) {
@@ -354,6 +386,7 @@ int main(int argc, char** argv) {
   int align_fails = test_align();
   int deform_fails = test_deform();
   int sparsify_fails = test_sparsify();
+  sparsify_fails += test_cull();
   if (deform_fails) printf("deform: %d failure(s)\n", deform_fails);
   if (argc > 1) g_eps = (float)atof(argv[1]);
   int fails = 0, total = 0, skipped = 0;

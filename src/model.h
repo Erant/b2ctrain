@@ -23,6 +23,7 @@ struct Model {
   ShBuf m_sh() const { ShBuf b; b.dc = m_sh_dc.ptr; b.hi = m_sh_hi.ptr; b.hi32 = m_sh_hi32.ptr; b.stride = (size_t)cap; return b; }
   // Refine statistics accumulated between refines.
   DevBuf<float> refine_norm, max_screen, vis_count;
+  DevBuf<float> vis_weight;    // sum over steps and pixels of the splat's blend weight alpha*T (its rendered mass)
   DevBuf<uint32_t> last_step;  // Adam step at which the splat was last updated (lazy sparse Adam)
   int adam_t = 0;
 

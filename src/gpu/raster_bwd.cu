@@ -15,8 +15,9 @@ __global__ void __launch_bounds__(RT_PX) raster_bwd_kernel(
     const float4* __restrict__ v_out, const float4* __restrict__ v_feat_in,
     int W, int H, int tiles_x, float3 bg,
     const float* __restrict__ hollow_z, float hollow_margin, float hollow_lam,
-    float* __restrict__ v_splat, uint32_t* __restrict__ vis_flag) {
+    float* __restrict__ v_splat, uint32_t* __restrict__ vis_flag, float* __restrict__ vis_weight) {
   __shared__ float4 s0[RT_PX], s1[RT_PX], s2[RT_PX];
+  __shared__ float s_visw[RT_PX];
   __shared__ float2 s3[RT_PX];
   __shared__ uint32_t s_gid[RT_PX];
   __shared__ float s_grad[RT_PX][GRAD_LANES];
@@ -60,7 +61,7 @@ __global__ void __launch_bounds__(RT_PX) raster_bwd_kernel(
       if constexpr (FEAT) s3[threadIdx.x] = proj3[gid];
 #pragma unroll
       for (int k = 0; k < (int)GRAD_LANES; k++) s_grad[threadIdx.x][k] = 0.f;
-      s_vis[threadIdx.x] = 0;
+      s_vis[threadIdx.x] = 0; s_visw[threadIdx.x] = 0.f;
     }
     __syncthreads();
     for (int j = (int)count - 1; j >= 0; j--) {
@@ -69,6 +70,7 @@ __global__ void __launch_bounds__(RT_PX) raster_bwd_kernel(
 #pragma unroll
       for (int k = 0; k < (int)GRAD_LANES; k++) g[k] = 0.f;
       bool contrib = inside && idx < last;
+      float visw = 0.f;
       if (contrib) {
         float4 a = s0[j]; float4 c = s1[j];
         float dx = pcx - a.x, dy = pcy - a.y;
@@ -110,12 +112,13 @@ __global__ void __launch_bounds__(RT_PX) raster_bwd_kernel(
           S.x += cr * vis; S.y += cg * vis; S.z += cb * vis;
           if constexpr (FEAT) { Sf.x += fx * vis; Sf.y += fy * vis; Sf.z += fz * vis; }
           if constexpr (HOLLOW) Sh += hh * vis;
-          T = T_before;
+          T = T_before; visw = vis;
         }
       }
       unsigned mask = __ballot_sync(0xffffffffu, contrib);
       if (mask) {
         if (contrib && lane == __ffs(mask) - 1) s_vis[j] = 1;
+        { float v = warp_sum(visw); if (lane == 0 && v != 0.f) atomicAdd(&s_visw[j], v); }
 #pragma unroll
         for (int k = 0; k < (int)GRAD_LANES; k++) {
           float v = warp_sum(g[k]);
@@ -128,6 +131,7 @@ __global__ void __launch_bounds__(RT_PX) raster_bwd_kernel(
       uint32_t gid = s_gid[threadIdx.x];
       if (s_vis[threadIdx.x]) {
         vis_flag[gid] = 1u;
+        atomicAdd(vis_weight + gid, s_visw[threadIdx.x]);
         float* dst = v_splat + (size_t)gid * GRAD_LANES;
 #pragma unroll
         for (int k = 0; k < (int)GRAD_LANES; k++) { float v = s_grad[threadIdx.x][k]; if (v != 0.f) atomicAdd(dst + k, v); }
@@ -144,7 +148,7 @@ void rasterize_backward(RenderCtx& ctx, const Model& m, const RenderParams& p, c
   float3 bg = make_float3(p.bg[0], p.bg[1], p.bg[2]);
   dim3 grid(ctx.n_tiles), block(RT_PX);
   const bool feat = p.feat != FeatureMode::None, hollow = p.hollow_z != nullptr && p.hollow_lam != 0.f;
-#define L(F, HO) raster_bwd_kernel<F, HO><<<grid, block, 0, stream>>>(ctx.tile_ranges, ctx.vals_sorted, ctx.proj0, ctx.proj1, ctx.proj2, ctx.proj3, ctx.out_rgba, ctx.out_feat, ctx.last_idx, ctx.v_out, ctx.v_feat, ctx.W, ctx.H, ctx.tiles_x, bg, p.hollow_z, p.hollow_margin, p.hollow_lam, ctx.v_splat, ctx.vis_flag)
+#define L(F, HO) raster_bwd_kernel<F, HO><<<grid, block, 0, stream>>>(ctx.tile_ranges, ctx.vals_sorted, ctx.proj0, ctx.proj1, ctx.proj2, ctx.proj3, ctx.out_rgba, ctx.out_feat, ctx.last_idx, ctx.v_out, ctx.v_feat, ctx.W, ctx.H, ctx.tiles_x, bg, p.hollow_z, p.hollow_margin, p.hollow_lam, ctx.v_splat, ctx.vis_flag, m.vis_weight.ptr)
   if (feat) { if (hollow) L(true, true); else L(true, false); }
   else { if (hollow) L(false, true); else L(false, false); }
 #undef L

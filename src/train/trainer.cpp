@@ -70,6 +70,7 @@ struct Phase {
   uint32_t total = 0, start = 0;
   const std::vector<ViewGPU>* views = nullptr;   // full-resolution views to train on
   bool refine = false, normals = false, res_schedule = false, exports = false, evals = false;
+  bool cull = false;                              // prune by rendered mass at every refine interval (--cull-weight); a prune-only refine when `refine` is off
   bool hollow = false;                            // apply the hollow loss (needs a mesh)
   bool sparsify = false;                          // run the GaussianSpa phase (--sparsify)
   bool rig_learn_from_start = false;              // refits: the per-view rotations keep learning from their first step
@@ -230,13 +231,13 @@ int train_main(const Config& cfg) {
     fs::path out = fs::path(export_dir) / name;
     bool want_labels = final_export && cfg.export_labels && ds.n_labels > 0;
     if (final_export && cfg.export_labels && ds.n_labels == 0) log_warn("--export-labels: no training view carries a labels/ sidecar, so the ply gets no seg_label");
-    bool want_evidence = final_export && (cfg.export_evidence || cfg.evidence_prune_inmask.has_value() || want_labels);
+    bool want_evidence = (final_export && (cfg.evidence_prune_inmask.has_value() || cfg.evidence_prune_wall.has_value() || want_labels)) || cfg.export_evidence;
     SplatCloud c = model.download(stream);
     bake_min_scale_cpu(c, model, stream);
     if (want_evidence) {
       double te = now_seconds();
       compute_evidence(ctx, model, *evidence_views, gv.cams, cfg, stream, have_rig ? &rig : nullptr, &rig_view);
-      bool keep_evidence = cfg.export_evidence || cfg.evidence_prune_inmask.has_value();
+      bool keep_evidence = cfg.export_evidence || cfg.evidence_prune_inmask.has_value() || cfg.evidence_prune_wall.has_value();
       c.has_evidence = keep_evidence; if (keep_evidence) c.evidence = download_evidence(model, stream);
       if (want_labels) {
         c.has_labels = true; c.labels = download_labels(model, stream);
@@ -247,11 +248,11 @@ int train_main(const Config& cfg) {
         log_info("Label vote: %zu/%zu splats got a class from %d labelled view(s); most common class:count %s", voted, c.n, ds.n_labels, top.c_str());
       }
       log_info("Computed evidence for %zu splats over %zu views in %.1fs", c.n, evidence_views->size(), now_seconds() - te);
-      if (cfg.evidence_prune_inmask) {
-        float f = *cfg.evidence_prune_inmask;
+      if (final_export && (cfg.evidence_prune_inmask || cfg.evidence_prune_wall)) {
+        float f = cfg.evidence_prune_inmask ? *cfg.evidence_prune_inmask : -1.f, wall = cfg.evidence_prune_wall ? *cfg.evidence_prune_wall : -1.f;
         SplatCloud kept; kept.has_evidence = true; kept.has_scales = true; kept.has_labels = c.has_labels;
         std::vector<size_t> idx;
-        for (size_t i = 0; i < c.n; i++) { const float* e = &c.evidence[i * 7]; if (e[3] > 0.f && e[1] > 0.f && e[0] / e[1] >= f) idx.push_back(i); }
+        for (size_t i = 0; i < c.n; i++) { const float* e = &c.evidence[i * 7]; bool ok = e[1] > 0.f; if (f >= 0.f) ok = ok && e[3] > 0.f && e[0] / e[1] >= f; if (wall >= 0.f) ok = ok && e[1] >= wall; if (ok) idx.push_back(i); }
         int K = c.K();
         kept.resize(idx.size(), c.sh_degree);
         for (size_t j = 0; j < idx.size(); j++) {
@@ -263,7 +264,8 @@ int train_main(const Config& cfg) {
           for (int k = 0; k < 7; k++) kept.evidence[j * 7 + k] = c.evidence[i * 7 + k];
           if (c.has_labels) { kept.labels[j * 2] = c.labels[i * 2]; kept.labels[j * 2 + 1] = c.labels[i * 2 + 1]; }
         }
-        log_info("Evidence prune (inmask < %g): %zu -> %zu splats", f, c.n, kept.n);
+        std::string why; if (f >= 0.f) why += format("inmask < %g", f); if (wall >= 0.f) why += format("%sw_all < %g", why.empty() ? "" : ", ", wall);
+        log_info("Evidence prune (%s): %zu -> %zu splats", why.c_str(), c.n, kept.n);
         c = std::move(kept);
       }
     }
@@ -372,12 +374,21 @@ int train_main(const Config& cfg) {
 
       // Refine.
       float progress = (float)step / (float)std::max(1u, ph_total);
-      if (ph.refine && step % cfg.refine_every == 0 && progress <= 0.95f) {
+      const bool full_refine = ph.refine && progress <= 0.95f;
+      const bool cull_now = ph.cull && cfg.cull_weight > 0.f && step >= cfg.cull_start_iter;
+      if ((full_refine || cull_now) && step % cfg.refine_every == 0) {
         RefineParams rpar;
-        rpar.iter = step; rpar.total = ph_total; rpar.growth_allowed = step < ph.growth_stop;
+        rpar.iter = step; rpar.total = ph_total; rpar.growth_allowed = full_refine && step < ph.growth_stop;
         rpar.max_splats = cfg.max_splats; rpar.growth_grad_threshold = cfg.growth_grad_threshold; rpar.growth_select_fraction = cfg.growth_select_fraction;
         rpar.split_at_screen_size = cfg.split_at_screen_size; rpar.opac_decay = cfg.opac_decay; rpar.seed = (uint32_t)cfg.seed;
         rpar.no_new = ph.sparsify && (spa.active || spa_done);
+        if (!full_refine) { rpar.no_new = true; rpar.opac_decay = 0.f; rpar.split_at_screen_size = 0.f; }   // prune-only
+        if (cull_now && cfg.cull_no_relocate && !rpar.growth_allowed) rpar.no_new = true;
+        if (cull_now) {
+          // The window drew refine_every views of gv.views.size(); a view at pyramid level L has 4^-L of the pixels.
+          const float passes = (float)cfg.refine_every / (float)std::max<size_t>(gv.views.size(), 1);
+          rpar.cull_weight = cfg.cull_weight * passes / (float)(1 << (2 * level));
+        }
         RefineStats rs = refine.run(model, ctx, rpar, stream);
         if (rpar.no_new && rs.pruned > 0) {
           // The dead are killed, not relocated: drop them (and their z, u, score while the phase runs).
@@ -387,7 +398,7 @@ int train_main(const Config& cfg) {
         if (model.cap > (int)ctx.tile_count.count) ctx.setup(ctx.W, ctx.H, model.cap, stream);
         bounds = refine.bounds; median_scale = bounds.median_size();
         if (have_rig) rig.bind(model, stream);  // new and moved splats take the binding of their nearest rig vertex
-        log_info("Refine iter %u, %d splats (pruned %d, split %d, grown %d).", step, model.n, rs.pruned, rs.split_oversized, rs.grown);
+        log_info("Refine iter %u, %d splats (pruned %d of which culled %d, split %d, grown %d).", step, model.n, rs.pruned, rs.culled, rs.split_oversized, rs.grown);
         timer.mark("refine", stream);
       }
       timer.end();
@@ -437,6 +448,7 @@ int train_main(const Config& cfg) {
     main.refine = true; main.normals = true; main.res_schedule = res_schedule; main.exports = true; main.evals = true; main.growth_stop = growth_stop;
     main.hollow = hollow_on;
     main.sparsify = sparsify_on;
+    main.cull = cfg.cull_weight > 0.f;
     double train_time = train_phase(main);
     log_info("Training took %s (%.1f it/s)", format_duration(train_time).c_str(), (total - cfg.start_iter) / std::max(train_time, 1e-9));
   }
@@ -541,6 +553,7 @@ int train_main(const Config& cfg) {
       Phase refit;
       refit.total = cfg.align_steps; refit.views = &aligned_views; refit.label = format("align %u/%u · ", it, cfg.align_iters);
       refit.hollow = hollow_on;  // a regulariser, not supervision: it stays on through the refits
+      refit.cull = cfg.cull_weight > 0.f;   // prune-only refines: what the warped views no longer see goes
       double t = train_phase(refit);
       refit.rig_learn_from_start = true;
       log_info("Alignment %u/%u refit took %s (%.1f it/s)", it, cfg.align_iters, format_duration(t).c_str(), cfg.align_steps / std::max(t, 1e-9));

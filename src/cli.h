@@ -51,6 +51,12 @@ struct Config {
   bool export_labels = false;
   std::optional<float> evidence_prune_inmask;
   float evidence_normal_weight = 0.0f;
+  std::optional<float> evidence_prune_wall;   // final export: drop splats whose evidence w_all is below this
+  // Periodic visibility cull (gpu/refine.h cull_weight): at every refine, prune the splats whose rendered mass over
+  // the refine window is below cull_weight pixel-weights per full-resolution pass over the training views.
+  float cull_weight = 0.f;
+  uint32_t cull_start_iter = 0;
+  bool cull_no_relocate = false;   // once growth has stopped, culled/dead splats are dropped (compacted) instead of relocated
   bool rerun_enabled = false;
   // b2ctrain additions
   Recipe recipe = Recipe::Fast;

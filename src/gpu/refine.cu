@@ -52,7 +52,8 @@ __global__ void bake_kernel(int n, float4* __restrict__ pos, float4* __restrict_
 
 template <int K3>
 __global__ void prune_flags_kernel(int n, const float4* __restrict__ pos, const float4* __restrict__ quat, const float4* __restrict__ ls, ShBuf sb,
-                                   float3 center, float max_allowed, uint32_t* __restrict__ keep, uint32_t* __restrict__ dead) {
+                                   float3 center, float max_allowed, const float* __restrict__ vis_weight, float cull_weight,
+                                   uint32_t* __restrict__ keep, uint32_t* __restrict__ dead, uint32_t* __restrict__ culled) {
   int i = blockIdx.x * blockDim.x + threadIdx.x;
   if (i >= n) return;
   float4 p = pos[i], q = quat[i], l = ls[i];
@@ -64,7 +65,9 @@ __global__ void prune_flags_kernel(int n, const float4* __restrict__ pos, const 
     bad = o < MIN_OPACITY || sc.x > max_allowed || sc.y > max_allowed || sc.z > max_allowed
           || fabsf(p.x - center.x) > max_allowed || fabsf(p.y - center.y) > max_allowed || fabsf(p.z - center.z) > max_allowed;
   }
-  keep[i] = bad ? 0u : 1u; dead[i] = bad ? 1u : 0u;
+  bool cull = !bad && cull_weight > 0.f && vis_weight[i] < cull_weight;
+  bad |= cull;
+  keep[i] = bad ? 0u : 1u; dead[i] = bad ? 1u : 0u; culled[i] = cull ? 1u : 0u;
 }
 
 // Gumbel keys for weighted sampling without replacement. key = log(w) + Gumbel; -inf when w <= 0 or excluded.
@@ -246,18 +249,19 @@ RefineStats RefineState::run(Model& m, RenderCtx& ctx, const RefineParams& p, cu
   if (accumulate_min_scale) bake_min_scale(m, stream);
   if (bounds.extent[0] == 0.f) update_bounds(m, stream);
   size_t nn = (size_t)n;
-  keep.reserve(nn); dead_flag.reserve(nn); selected.reserve(nn); above.reserve(nn);
+  keep.reserve(nn); dead_flag.reserve(nn); selected.reserve(nn); above.reserve(nn); cull_flag.reserve(nn);
   keys.reserve(nn); keys_sorted.reserve(nn); vals.reserve(nn); vals_sorted.reserve(nn);
   sel_parent.reserve(nn * 2 + 16); sel_child.reserve(nn * 2 + 16);
   // 1. Prune flags.
   float max_allowed = bounds.max_extent() * 100.f;
   float3 center = make_float3(bounds.center[0], bounds.center[1], bounds.center[2]);
-#define PF(K) prune_flags_kernel<K><<<div_up(n, 256), 256, 0, stream>>>(n, m.pos_op, m.quat, m.lscale, m.sh(), center, max_allowed, keep, dead_flag)
+#define PF(K) prune_flags_kernel<K><<<div_up(n, 256), 256, 0, stream>>>(n, m.pos_op, m.quat, m.lscale, m.sh(), center, max_allowed, m.vis_weight, p.cull_weight, keep, dead_flag, cull_flag)
   switch (m.degree) { case 0: PF(3); break; case 1: PF(12); break; case 2: PF(27); break; case 3: PF(48); break; default: PF(75); break; }
 #undef PF
   CUDA_KERNEL_CHECK();
   uint32_t n_dead = select_flagged(*this, dead_flag, n, dead_idx, stream);
   stats.pruned = (int)n_dead;
+  if (p.cull_weight > 0.f) stats.culled = (int)count_flags(*this, cull_flag, n, stream);
   uint32_t alive = (uint32_t)n - n_dead;
   selected.zero(stream, nn);
   uint32_t n_sel = 0;

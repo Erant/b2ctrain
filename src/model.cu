@@ -28,12 +28,12 @@ void Model::reserve(int want, cudaStream_t stream) {
   grow_planar(m_sh_dc, 3);
   if (sh_fp16) grow_planar(m_sh_hi, hi_lanes); else grow_planar(m_sh_hi32, hi_lanes);
   growf(v_sh);
-  growf(refine_norm); growf(max_screen); growf(vis_count); last_step.reserve((size_t)ncap, true, stream);
+  growf(refine_norm); growf(max_screen); growf(vis_count); growf(vis_weight); last_step.reserve((size_t)ncap, true, stream);
   size_t old = cap;
   auto zero_tail4 = [&](DevBuf<float4>& b) { CUDA_CHECK(cudaMemsetAsync(b.ptr + old, 0, (ncap - old) * sizeof(float4), stream)); };
   auto zero_tailf = [&](DevBuf<float>& b) { CUDA_CHECK(cudaMemsetAsync(b.ptr + old, 0, (ncap - old) * sizeof(float), stream)); };
   zero_tail4(m_pos_op); zero_tail4(v_pos_op); zero_tail4(m_quat); zero_tail4(v_quat); zero_tail4(m_lscale); zero_tail4(v_lscale);
-  zero_tailf(v_sh); zero_tailf(refine_norm); zero_tailf(max_screen); zero_tailf(vis_count);
+  zero_tailf(v_sh); zero_tailf(refine_norm); zero_tailf(max_screen); zero_tailf(vis_count); zero_tailf(vis_weight);
   CUDA_CHECK(cudaMemsetAsync(last_step.ptr + old, 0, (ncap - old) * sizeof(uint32_t), stream));
   cap = ncap;
 }
@@ -44,7 +44,7 @@ void Model::upload(const SplatCloud& c, cudaStream_t stream) {
   cap = 0;
   pos_op.free(); quat.free(); lscale.free(); sh_dc.free(); sh_hi.free(); sh_hi32.free();
   m_pos_op.free(); v_pos_op.free(); m_quat.free(); v_quat.free(); m_lscale.free(); v_lscale.free(); m_sh_dc.free(); m_sh_hi.free(); m_sh_hi32.free(); v_sh.free();
-  refine_norm.free(); max_screen.free(); vis_count.free(); last_step.free();
+  refine_norm.free(); max_screen.free(); vis_count.free(); vis_weight.free(); last_step.free();
   reserve(n, stream);
   std::vector<float4> p(n), q(n), s(n);
   for (int i = 0; i < n; i++) {
@@ -105,7 +105,7 @@ void Model::zero_optimizer(cudaStream_t stream) {
   m_pos_op.zero(stream); v_pos_op.zero(stream); m_quat.zero(stream); v_quat.zero(stream); m_lscale.zero(stream); v_lscale.zero(stream);
   m_sh_dc.zero(stream); m_sh_hi.zero(stream); m_sh_hi32.zero(stream); v_sh.zero(stream); adam_t = 0; last_step.zero(stream);
 }
-void Model::zero_stats(cudaStream_t stream) { refine_norm.zero(stream); max_screen.zero(stream); vis_count.zero(stream); }
+void Model::zero_stats(cudaStream_t stream) { refine_norm.zero(stream); max_screen.zero(stream); vis_count.zero(stream); vis_weight.zero(stream); }
 
 namespace {
 // dst[l * stride + j] = src[l * stride + idx[j]] for every lane l.
@@ -148,7 +148,7 @@ int Model::compact(const uint32_t* keep, const std::vector<DevBuf<float>*>& extr
   gather(m_sh_dc, 3);
   if (sh_fp16) gather(m_sh_hi, hi_lanes); else gather(m_sh_hi32, hi_lanes);
   gather(v_sh, 1);
-  gather(refine_norm, 1); gather(max_screen, 1); gather(vis_count, 1); gather(last_step, 1);
+  gather(refine_norm, 1); gather(max_screen, 1); gather(vis_count, 1); gather(vis_weight, 1); gather(last_step, 1);
   for (DevBuf<float>* e : extras) gather(*e, 1);
   n = (int)kept;
   return n;

@@ -14,8 +14,9 @@ struct RefineParams {
   float opac_decay = 0.004f;
   uint32_t seed = 42;
   bool no_new = false;   // sparsification: no relocation, no splits, no growth; dead splats are killed and `keep` says which
+  float cull_weight = 0.f;   // > 0: prune a splat whose vis_weight (rendered mass since the last refine) is below this
 };
-struct RefineStats { int pruned = 0, relocated = 0, grown = 0, split_oversized = 0; };
+struct RefineStats { int pruned = 0, relocated = 0, grown = 0, split_oversized = 0, culled = 0; };
 
 struct RefineState {
   Bounds bounds{};
@@ -29,6 +30,7 @@ struct RefineState {
   PinnedBuf<uint32_t> h_counts;
   PinnedBuf<float> h_bounds;
   int refine_count = 0;
+  DevBuf<uint32_t> cull_flag;
 
   void init(const Model& m, cudaStream_t stream);
   void set_cameras(const std::vector<float>& pos, const std::vector<float>& focal);
