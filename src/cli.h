@@ -79,6 +79,27 @@ struct Config {
   // fragments in front is what pushes the front surface opaque.
   std::string mesh;                   // explicit mesh path (default: <dataset>/mesh.ply if present)
   std::string body_rig;               // per-view articulated deformation rig (gpu/deform.h), empty = off
+  std::string cage;                   // cage-posed training (gpu/cage.h): views named like a cage frame render posed, empty = off
+  float cage_min_conf = 0.5f;
+  float pose_contain_weight = 0.f;    // pose containment loss (gpu/pose_contain.h), 0 = off
+  float pose_contain_fraction = 0.5f;
+  std::string pose_contain_cameras;    // cameras.json of the containment views (b2crig), named "<cage frame>[@...]"
+  std::string pose_contain_exclude;    // uint8 per warm-start splat: 1 = left out of the targets (b2crig: the deep interior)
+  uint32_t pose_contain_dilate = 5;
+  float cage_max_growth = 0.f;
+  float cage_fade_start = 0.f, cage_fade_end = 0.f;
+  float cage_stretch_weight = 0.f;
+  float cage_stretch_tau = 0.004f;
+  bool cage_app = false;              // pose-dependent appearance MLP (gpu/cage_app.h)
+  std::string cage_app_init;
+  float cage_app_lr = 1e-3f, cage_app_lr_latent = 1e-3f;
+  float cage_app_deadzone = 0.f, cage_app_max_do = 1e30f, cage_app_max_ds = 1.f, cage_app_max_dp = 0.f;
+  float cage_app_reg_rise_do = 0.f, cage_app_reg_rise_ds = 0.f, cage_app_reg_out = 0.f, cage_app_latent_decay = 0.f;
+  bool cage_open = false;             // two-state splats gated by cage geometry (gpu/cage_open.h)
+  float cage_open_start = 30.f, cage_open_end = 70.f, cage_open_max_do = 0.f;
+  float cage_open_lr = 0.01f, cage_open_lr_opacity = 0.012f;
+  float cage_open_reg = 0.f;
+  float cage_open_snr = 0.f, cage_open_beta1 = 0.9f;
   std::string body_rig_init;          // seed rotations per view and joint (the layout of the exported body_rig_omega.json)
   uint32_t body_rig_start_iter = 1000;   // learn the per-view rotations from this iteration of the main run on
   uint32_t body_rig_stop_iter = 0;       // ... and stop at this one (0 = never; they then keep learning through the alignment refits)

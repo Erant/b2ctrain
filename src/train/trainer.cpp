@@ -8,6 +8,12 @@
 #include "gpu/sparsify.h"
 #include "gpu/align.h"
 #include "gpu/deform.h"
+#include "gpu/cage.h"
+#include "gpu/cage_app.h"
+#include "gpu/cage_open.h"
+#include "gpu/pose_contain.h"
+#include "render/renderer.h"
+#include "ply.h"
 #include "gpu/meshdepth.h"
 #include "dataset/mesh.h"
 #include "train/evidence.h"
@@ -16,6 +22,7 @@
 #include "json.hpp"
 #include "stb_image_write.h"
 #include <random>
+#include <array>
 #include <fstream>
 #include <filesystem>
 #include <algorithm>
@@ -205,7 +212,149 @@ int train_main(const Config& cfg) {
       log_info("Body rig seed %s: %d rotations over %d views (max %.1f deg), %d views not in the rig; the zero pull anchors to the seed", cfg.body_rig_init.c_str(), seeded, seeded_views, mx * 57.29577951, unknown);
     }
   }
+  // Cage-posed training (--cage, b2crig): views named like a cage frame render the splat posed by it.
+  CageRig cage; bool have_cage = false;
+  CageApp app; int app_stats_due = 0;   // --cage-app (gpu/cage_app.h)
+  CageOpen open; int open_stats_due = 0; bool open_used = false;   // --cage-open (gpu/cage_open.h)
+  std::vector<float> cage_face_stretch; DevBuf<float> cage_stretch_w;   // stretch regulariser (--cage-stretch-weight)
+  std::vector<int> cage_view(ds.train.size(), -1);
+  std::vector<float> cage_labels;   // host [n][2] seg_label, seg_conf: what bind() reads; new splats inherit their parent's
+  if (!cfg.cage.empty()) {
+    if (have_rig) fail("--cage and --body-rig are exclusive");
+    if (cfg.sparsify > 0.f) fail("--cage does not follow --sparsify's compaction (the labels would fall out of step)");
+    if (!cage.load(cfg.cage)) fail("--cage %s: cannot open", cfg.cage.c_str());
+    SplatCloud lc;   // the warm-start loader keeps no labels / gates: read them from the ply itself
+    if ((!init.has_labels || cfg.cage_open) && !ds.init_ply.empty()) lc = read_ply(ds.init_ply);
+    if (init.has_labels) cage_labels = init.labels;
+    else if (lc.has_labels && lc.n == init.n) cage_labels = lc.labels;
+    if (cage_labels.size() != init.n * 2) fail("--cage needs a warm start whose init.ply carries seg_label (the cage binding)");
+    if (cfg.cage_open) {
+      if (cfg.cage_app) fail("--cage-open and --cage-app are exclusive");
+      if (lc.n != init.n) fail("--cage-open: init.ply not readable / size mismatch");
+      open.start = cfg.cage_open_start; open.end = cfg.cage_open_end; open.max_do = cfg.cage_open_max_do; open.reg_col = cfg.cage_open_reg;
+      open.snr = cfg.cage_open_snr; open.beta1 = cfg.cage_open_beta1;
+      open.init(cage, lc, stream);
+      log_info("Cage open state: gate from the cage (b2crig: partners within %g m, beyond %g m), blend over gate angle %g -> %g deg, max d opacity %g, lr %g / %g, colour pull %g, snr gate %g (beta1 %g)%s", cage.open_radius, cage.open_min_dist, open.start, open.end, open.max_do, cfg.cage_open_lr, cfg.cage_open_lr_opacity, open.reg_col, open.snr, open.beta1, lc.has_open ? " (states continued from the ply)" : "");
+    }
+    int matched = 0;
+    for (size_t i = 0; i < ds.train.size(); i++) {
+      std::string nm = ds.train[i].name; int fr = cage.frame_index(nm);
+      if (fr < 0) { auto d0 = nm.rfind('.'); if (d0 != std::string::npos) fr = cage.frame_index(nm.substr(0, d0)); }
+      if (fr < 0) { auto d0 = nm.find('@'); if (d0 != std::string::npos) fr = cage.frame_index(nm.substr(0, d0)); }
+      cage_view[i] = fr; matched += fr >= 0;
+    }
+    cage.bind(model, cage_labels, cfg.cage_min_conf, stream);
+    cage.max_growth = cfg.cage_max_growth;
+    cage.fade_start = cfg.cage_fade_start; cage.fade_end = cfg.cage_fade_end;
+    have_cage = true;
+    if (cfg.cage_app) {
+      if (!cfg.cage_app_init.empty()) {
+        if (!app.load(cfg.cage_app_init, cage, stream)) fail("--cage-app-init %s: cannot open", cfg.cage_app_init.c_str());
+        log_info("Cage appearance MLP from %s", cfg.cage_app_init.c_str());
+      } else {
+        app.init(cage, (uint32_t)cfg.seed, stream);
+      }
+      app.dz = cfg.cage_app_deadzone; app.max_do = cfg.cage_app_max_do; app.max_ds = cfg.cage_app_max_ds; app.max_dp = cfg.cage_app_max_dp;
+      app.reg_rise_do = cfg.cage_app_reg_rise_do; app.reg_rise_ds = cfg.cage_app_reg_rise_ds; app.reg_out = cfg.cage_app_reg_out; app.latent_decay = cfg.cage_app_latent_decay;
+      log_info("Cage appearance MLP: %d vertices, %d weights + %d latents, lr %g / %g, dead zone %g, max d opacity %g, max d log scale %g, max offset %g m", app.nv, APP_NP, app.nv * APP_LAT, cfg.cage_app_lr, cfg.cage_app_lr_latent, app.dz, app.max_do, app.max_ds, app.max_dp);
+    }
+    if (cfg.cage_stretch_weight > 0.f) {
+      cage_face_stretch = cage.face_stretch(stream);
+      cage_stretch_w.upload(cage.splat_stretch_weights(cage_face_stretch, cfg.cage_stretch_weight, stream), stream);
+      int n_str = 0; float mx = 1.f;
+      for (float v : cage_face_stretch) { n_str += v > 1.25f; mx = std::max(mx, v); }
+      log_info("Stretch regulariser: weight %g, tau %g m; %d of %zu cage triangles grow > 1.25x over the %d frames (max %.2fx)",
+               cfg.cage_stretch_weight, cfg.cage_stretch_tau, n_str, cage_face_stretch.size(), cage.nframes, mx);
+    }
+    log_info("Cage %s: %zu layers, %d frames; %d/%zu training views render posed, the rest canonical; %d/%d splats bound across layers",
+             cfg.cage.c_str(), cage.layers.size(), cage.nframes, matched, ds.train.size(), cage.n_fallback, model.n);
+  }
+  // Pose containment loss (--pose-contain-weight, gpu/pose_contain.h): alpha-only virtual views of the posed splat.
+  PoseContain contain; const int n_real_views = (int)ds.train.size();
+  if (cfg.pose_contain_weight > 0.f) {
+    if (!have_cage) fail("--pose-contain-weight needs --cage (its frames pose the containment views)");
+    if (cfg.pose_contain_cameras.empty()) fail("--pose-contain-weight needs --pose-contain-cameras (b2crig writes them)");
+    const double tb = now_seconds();
+    std::ifstream cf(cfg.pose_contain_cameras);
+    if (!cf) fail("--pose-contain-cameras %s: cannot open", cfg.pose_contain_cameras.c_str());
+    const nlohmann::json cj = nlohmann::json::parse(cf);
+    const int W2 = cj.at("width").get<int>(), H2 = cj.at("height").get<int>();
+    const auto& jc = cj.at("cameras");
+    const int N = (int)jc.size(); const size_t npx = (size_t)W2 * H2;
+    if (N == 0) fail("--pose-contain-cameras %s: no cameras", cfg.pose_contain_cameras.c_str());
+    std::vector<uint8_t> hide(model.n, 0);
+    if (!cfg.pose_contain_exclude.empty()) {   // uint8 per warm-start splat
+      std::ifstream ef(cfg.pose_contain_exclude, std::ios::binary | std::ios::ate);
+      if (!ef) fail("--pose-contain-exclude %s: cannot open", cfg.pose_contain_exclude.c_str());
+      if ((size_t)ef.tellg() != (size_t)model.n) fail("--pose-contain-exclude %s: %lld bytes for %d warm-start splats", cfg.pose_contain_exclude.c_str(), (long long)ef.tellg(), model.n);
+      ef.seekg(0); ef.read((char*)hide.data(), model.n);
+    }
+    for (uint8_t h : hide) contain.n_deep += h != 0;
+    contain.deep.upload(hide, stream);
+    contain.rgba.reserve(npx * N); contain.weights.reserve(npx * N);
+    ctx.setup(W2, H2, model.cap, stream);
+    cage.refresh_offsets(model, stream);
+    for (int k = 0; k < N; k++) {
+      const std::string nm = jc[k].at("name").get<std::string>();
+      const int fr = cage.frame_index(nm.substr(0, nm.find('@')));
+      if (fr < 0) fail("--pose-contain-cameras: camera %s names no frame of the cage", nm.c_str());
+      const Camera cam = camera_from_json(jc[k], W2, H2);
+      cage.pose(fr, model, stream);
+      pose_contain_hide(cage.pos_view.ptr, contain.deep.ptr, model.n, stream);
+      RenderParams rp; rp.cam = CameraGPU::from(cam, W2, H2); rp.sh_degree = 0; rp.bwd_info = false;
+      rp.pos_override = cage.pos_view; rp.quat_override = cage.quat_view; rp.lscale_override = cage.lscale_view; rp.sh_frame = cage.sh_frame;
+      render_forward(ctx, model, rp, stream);
+      pose_contain_target(ctx.out_rgba.ptr, W2, H2, (int)cfg.pose_contain_dilate, 0.3f, contain.rgba.ptr + npx * k, contain.weights.ptr + npx * k, stream);
+      ViewGPU g; g.W = W2; g.H = H2; g.has_alpha = true; g.masked = false; g.rgba = contain.rgba.ptr + npx * k; g.weights = contain.weights.ptr + npx * k;
+      contain.views.push_back(g); contain.cams.push_back(cam); contain.frame.push_back(fr);
+      cage_view.push_back(fr);   // virtual view n_real_views + k renders posed by its frame
+    }
+    CUDA_CHECK(cudaStreamSynchronize(stream));
+    contain.deep.free();
+    contain.on = true; contain.fraction = std::min(std::max(cfg.pose_contain_fraction, 0.f), 1.f);
+    log_info("Pose containment: %d views (%dx%d) from %s, %d/%d splats left out of the targets, dilate %u px, weight %g on %.0f%% of the steps (%.1fs)",
+             N, W2, H2, cfg.pose_contain_cameras.c_str(), contain.n_deep, model.n, cfg.pose_contain_dilate, cfg.pose_contain_weight, 100.f * contain.fraction, now_seconds() - tb);
+  }
+  auto cage_rebind = [&]() {   // after refine: children take their parent's label, then every splat is bound again
+    if (!have_cage) return;
+    cage_labels.resize((size_t)model.n * 2, 0.f);
+    if (refine.last_pairs > 0) {
+      auto par = refine.sel_parent.download(refine.last_pairs, stream), chi = refine.sel_child.download(refine.last_pairs, stream);
+      for (uint32_t k = 0; k < refine.last_pairs; k++) {
+        if ((int)chi[k] >= model.n || (int)par[k] >= model.n) continue;
+        cage_labels[(size_t)chi[k] * 2] = cage_labels[(size_t)par[k] * 2]; cage_labels[(size_t)chi[k] * 2 + 1] = cage_labels[(size_t)par[k] * 2 + 1];
+      }
+    }
+    cage.bind(model, cage_labels, cfg.cage_min_conf, stream);
+    if (!cage_face_stretch.empty()) cage_stretch_w.upload(cage.splat_stretch_weights(cage_face_stretch, cfg.cage_stretch_weight, stream), stream);
+    if (open.on) open.inherit(refine.sel_parent, refine.sel_child, refine.last_pairs, model.n, stream);
+  };
   auto pose_for_view = [&](int vi, RenderParams& rp) {  // vi: training view index
+    if (have_cage) {
+      // A hollow-loss proxy that is the cage's body layer (same vertices) follows the view's pose; else it stays put.
+      const bool mesh_is_body = have_mesh && mesh.nv > 0 && mesh.nv == cage.layers[0].v_count;
+      if (vi < 0 || cage_view[vi] < 0) {
+        if (mesh_is_body) CUDA_CHECK(cudaMemcpyAsync(mesh.v.ptr, cage.verts0.ptr, (size_t)mesh.nv * sizeof(float3), cudaMemcpyDeviceToDevice, stream));
+        return;
+      }
+      cage.refresh_offsets(model, stream);
+      cage.pose(cage_view[vi], model, stream);
+      rp.pos_override = cage.pos_view; rp.quat_override = cage.quat_view; rp.lscale_override = cage.lscale_view; rp.sh_frame = cage.sh_frame;
+      if (app.on) {
+        const bool st = app_stats_due > 0 && --app_stats_due == 0;
+        app.apply(cage, model, stream, st);
+        if (st) log_info("Cage appearance: mean |alpha| %.4f, |d opacity logit| %.4f, |d log scale| %.4f, |offset| %.4f m over %d splats (this view's pose)", app.stat_alpha, app.stat_do, app.stat_ds, app.stat_dp, model.n);
+        rp.app = app.splat_app; rp.col_base = app.col_base;
+      }
+      if (open.on) {
+        const bool st = open_stats_due > 0 && --open_stats_due == 0;
+        open.apply(cage, model, stream, st);
+        if (st) log_info("Cage open state: mean g %.4f, |d opacity logit| %.4f over %d splats, %d open in this view's pose", open.stat_g, open.stat_do, model.n, open.stat_open);
+        rp.app = open.splat_app; rp.col_base = open.col_base; rp.app_add = true; open_used = true;
+      }
+      if (mesh_is_body) CUDA_CHECK(cudaMemcpyAsync(mesh.v.ptr, cage.verts_view.ptr, (size_t)mesh.nv * sizeof(float3), cudaMemcpyDeviceToDevice, stream));
+      return;
+    }
     if (!have_rig || vi < 0 || rig_view[vi] < 0) return;
     rig.pose(rig_view[vi], model, stream); rp.pos_override = rig.pos_view;
     if (have_mesh && mesh.nv > 0) rig.pose_points(rig_view[vi], mesh_canon, mesh_bj, mesh_bw, mesh_bv, mesh.nv, mesh.v, stream);
@@ -234,6 +383,8 @@ int train_main(const Config& cfg) {
     bool want_evidence = (final_export && (cfg.evidence_prune_inmask.has_value() || cfg.evidence_prune_wall.has_value() || want_labels)) || cfg.export_evidence;
     SplatCloud c = model.download(stream);
     bake_min_scale_cpu(c, model, stream);
+    if (have_cage && cage_labels.size() == c.n * 2) { c.labels = cage_labels; c.has_labels = true; }
+    if (open.on) open.download(c, stream);
     if (want_evidence) {
       double te = now_seconds();
       compute_evidence(ctx, model, *evidence_views, gv.cams, cfg, stream, have_rig ? &rig : nullptr, &rig_view);
@@ -250,7 +401,7 @@ int train_main(const Config& cfg) {
       log_info("Computed evidence for %zu splats over %zu views in %.1fs", c.n, evidence_views->size(), now_seconds() - te);
       if (final_export && (cfg.evidence_prune_inmask || cfg.evidence_prune_wall)) {
         float f = cfg.evidence_prune_inmask ? *cfg.evidence_prune_inmask : -1.f, wall = cfg.evidence_prune_wall ? *cfg.evidence_prune_wall : -1.f;
-        SplatCloud kept; kept.has_evidence = true; kept.has_scales = true; kept.has_labels = c.has_labels;
+        SplatCloud kept; kept.has_evidence = true; kept.has_scales = true; kept.has_labels = c.has_labels; kept.has_gate = c.has_gate; kept.has_gate_s = c.has_gate_s; kept.has_open = c.has_open;
         std::vector<size_t> idx;
         for (size_t i = 0; i < c.n; i++) { const float* e = &c.evidence[i * 7]; bool ok = e[1] > 0.f; if (f >= 0.f) ok = ok && e[3] > 0.f && e[0] / e[1] >= f; if (wall >= 0.f) ok = ok && e[1] >= wall; if (ok) idx.push_back(i); }
         int K = c.K();
@@ -263,6 +414,9 @@ int train_main(const Config& cfg) {
           for (int k = 0; k < K * 3; k++) kept.sh[j * K * 3 + k] = c.sh[i * K * 3 + k];
           for (int k = 0; k < 7; k++) kept.evidence[j * 7 + k] = c.evidence[i * 7 + k];
           if (c.has_labels) { kept.labels[j * 2] = c.labels[i * 2]; kept.labels[j * 2 + 1] = c.labels[i * 2 + 1]; }
+          if (c.has_gate) { kept.gate[j * 2] = c.gate[i * 2]; kept.gate[j * 2 + 1] = c.gate[i * 2 + 1]; }
+          if (c.has_gate_s) kept.gate_s[j] = c.gate_s[i];
+          if (c.has_open) for (int k = 0; k < 4; k++) kept.open[j * 4 + k] = c.open[i * 4 + k];
         }
         std::string why; if (f >= 0.f) why += format("inmask < %g", f); if (wall >= 0.f) why += format("%sw_all < %g", why.empty() ? "" : ", ", wall);
         log_info("Evidence prune (%s): %zu -> %zu splats", why.c_str(), c.n, kept.n);
@@ -270,8 +424,15 @@ int train_main(const Config& cfg) {
       }
     }
     std::vector<std::string> comments = {"Exported from Brush", "Vertical axis: y", format("SH degree: %d", c.sh_degree), "SplatRenderMode: default"};
+    if (have_cage && !ds.init_ply.empty()) {   // a cage retraining keeps the subject's b2c.* header (MHR frame, orbit record)
+      std::ifstream in(ds.init_ply, std::ios::binary); std::string line;
+      while (std::getline(in, line) && line != "end_header")
+        if (line.rfind("comment b2c.", 0) == 0 && line.rfind("comment b2c.cage_open ", 0) != 0) comments.push_back(line.substr(8));
+    }
+    if (open.on) comments.push_back(open.header_comment());
     write_ply(out.string(), c, comments);
     log_info("Exported %zu splats to %s", c.n, out.string().c_str());
+    if (app.on) { fs::path ap = out; ap.replace_extension(".app"); app.save(ap.string(), stream); log_info("Exported the cage appearance MLP to %s", ap.string().c_str()); }
   };
 
   auto train_phase = [&](const Phase& ph) {
@@ -284,16 +445,19 @@ int train_main(const Config& cfg) {
     while (step < ph_total) {
       step++;
       timer.begin(stream);
-      int vi = next_view();
+      const bool contain_step = contain.on && std::generate_canonical<float, 24>(rng) < contain.fraction;
+      const int ci = contain_step ? (int)(rng() % contain.views.size()) : -1;
+      int vi = contain_step ? n_real_views + ci : next_view();   // a containment view poses by cage_view[vi] like a real one
       int level = 0;
-      if (ph.res_schedule) { float pr = (float)step / (float)std::max(1u, ph_total); level = pr < cfg.res_quarter_until ? 2 : (pr < cfg.res_half_until ? 1 : 0); }
-      const ViewGPU& view = (level > 0 && !gv.lvl_views[level].empty()) ? gv.lvl_views[level][vi] : (*ph.views)[vi];
-      const Camera& cam = gv.cams[vi];
-      bool normals_active = ph.normals && cfg.normal_loss_weight > 0.f && step >= cfg.normal_loss_start_iter && ((step - cfg.normal_loss_start_iter) % cfg.normal_loss_every == 0) && view.normals != nullptr;
+      if (ph.res_schedule && !contain_step) { float pr = (float)step / (float)std::max(1u, ph_total); level = pr < cfg.res_quarter_until ? 2 : (pr < cfg.res_half_until ? 1 : 0); }
+      const ViewGPU& view = contain_step ? contain.views[ci] : (level > 0 && !gv.lvl_views[level].empty()) ? gv.lvl_views[level][vi] : (*ph.views)[vi];
+      const Camera& cam = contain_step ? contain.cams[ci] : gv.cams[vi];
+      bool normals_active = !contain_step && ph.normals && cfg.normal_loss_weight > 0.f && step >= cfg.normal_loss_start_iter && ((step - cfg.normal_loss_start_iter) % cfg.normal_loss_every == 0) && view.normals != nullptr;
       float bg[3];
       for (int k = 0; k < 3; k++) bg[k] = std::min(std::max(cfg.background_color[k] + uni(rng) * cfg.background_noise_strength, 0.f), 1.f);
 
       RenderParams rp; rp.cam = CameraGPU::from(cam, view.W, view.H);
+      open_used = false;
       for (int k = 0; k < 3; k++) rp.bg[k] = bg[k];
       rp.warp = view.warp; rp.warp_w = view.warp_w; rp.warp_h = view.warp_h;
       pose_for_view(vi, rp);
@@ -301,7 +465,7 @@ int train_main(const Config& cfg) {
       rp.feat = normals_active ? FeatureMode::Normals : FeatureMode::None;
       rp.bwd_info = true;
       if (view.W != ctx.W || view.H != ctx.H) ctx.setup(view.W, view.H, model.cap, stream);
-      const bool hollow_active = ph.hollow && step >= std::max(cfg.hollow_start_iter, 1u);
+      const bool hollow_active = !contain_step && ph.hollow && step >= std::max(cfg.hollow_start_iter, 1u);
       if (hollow_active) {
         mesh.rasterize(rp.cam, view.W, view.H, (int)cfg.hollow_dilate, stream);
         rp.hollow_z = mesh.depth; rp.hollow_margin = cfg.hollow_margin; rp.hollow_lam = cfg.hollow_weight / ((float)view.W * (float)view.H);
@@ -318,6 +482,7 @@ int train_main(const Config& cfg) {
       lp.mask = view.masked;
       lp.alpha_lane = view.has_alpha && !view.masked && cfg.match_alpha_weight > 0.f;
       lp.match_alpha_weight = cfg.match_alpha_weight;
+      if (contain_step) { lp.l1_w = 0.f; lp.ssim_w = 0.f; lp.mask = false; lp.composite = true; lp.alpha_lane = true; lp.match_alpha_weight = cfg.pose_contain_weight; }
       lp.scale = (view.masked && cfg.normalize_masked_loss) ? 1.f / std::max(view.alpha_coverage, 0.01f) : 1.f;
       lp.grad_scale = use_tc ? 3.f * (float)view.W * (float)view.H : 1.f;
       photometric_loss(ctx, view, lp, stream);
@@ -326,9 +491,17 @@ int train_main(const Config& cfg) {
       accumulate_loss(ctx, stream);
       timer.mark("loss", stream);
       if (use_tc) rasterize_backward_tc(ctx, model, rp, lp.grad_scale, stream); else rasterize_backward(ctx, model, rp, stream);
+      if (rp.app && app.on) app.pre_optim(ctx, model, stream);
+      if (open_used) open.pre_optim(ctx, model, stream);
       timer.mark("backward", stream);
 
       OptimParams op; op.cam = rp.cam; op.active_sh_degree = rp.sh_degree; op.t = ++model.adam_t; op.pos_override = rp.pos_override;
+      if (have_cage && rp.pos_override) {   // posed by the cage: the VJP at the posed splat, the update turned back to canonical
+        op.quat_override = rp.quat_override; op.lscale_override = rp.lscale_override; op.sh_frame = rp.sh_frame; op.canon_rot = cage.sh_frame.ptr;
+      }
+      if (!cage_face_stretch.empty()) { op.stretch_w = cage_stretch_w.ptr; op.stretch_log_tau = logf(cfg.cage_stretch_tau); }
+      if (rp.app && app.on) { op.g_app_out = app.g_app; if (app.max_dp > 0.f && !op.g_pos_out) op.g_pos_out = app.g_pos; }
+      if (open_used) op.g_app_out = open.g_app;
       const bool rig_stopped = cfg.body_rig_stop_iter > 0 && (ph.rig_learn_from_start || step >= cfg.body_rig_stop_iter);
       const bool rig_learn = have_rig && rp.pos_override && !rig_stopped && (ph.rig_learn_from_start || step >= cfg.body_rig_start_iter);
       if (rig_learn) op.g_pos_out = rig.g_pos;
@@ -340,6 +513,14 @@ int train_main(const Config& cfg) {
       const bool spa_step = ph.sparsify && spa.active && step > cfg.sparsify_start_iter && step <= cfg.sparsify_stop_iter && step % cfg.sparsify_every == 0;
       if (spa_step) { op.spa_z = spa.z; op.spa_u = spa.u; op.spa_rho = spa.rho; }
       optimizer_step(ctx, model, op, stream);
+      if (rp.app && app.on) {
+        app.step(cage, model, cfg.cage_app_lr, cfg.cage_app_lr_latent, stream);
+        if (app.adam_t % 1000 == 0) { app_stats_due = 1; app.stats_grad = true; }
+      }
+      if (open_used) {
+        open.step(model, cfg.cage_open_lr, cfg.cage_open_lr_opacity, stream);
+        if (open.adam_t % 1000 == 0) { open_stats_due = 1; open.stats_grad = true; }
+      }
       timer.mark("optim", stream);
       if (ph.sparsify && !spa_done) {
         if (!spa.active && step >= cfg.sparsify_start_iter) {
@@ -398,6 +579,7 @@ int train_main(const Config& cfg) {
         if (model.cap > (int)ctx.tile_count.count) ctx.setup(ctx.W, ctx.H, model.cap, stream);
         bounds = refine.bounds; median_scale = bounds.median_size();
         if (have_rig) rig.bind(model, stream);  // new and moved splats take the binding of their nearest rig vertex
+        cage_rebind();
         log_info("Refine iter %u, %d splats (pruned %d of which culled %d, split %d, grown %d).", step, model.n, rs.pruned, rs.culled, rs.split_oversized, rs.grown);
         timer.mark("refine", stream);
       }

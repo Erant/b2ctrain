@@ -43,6 +43,17 @@ struct RenderParams {
   int warp_w = 0, warp_h = 0;
   // Articulated per-view deformation (gpu/deform.h): render from these means instead of the model's canonical ones.
   const float4* pos_override = nullptr;
+  // Cage deformation (gpu/cage.h): the posed rotation (w, x, y, z) and log scales (with the canonical floor in .w),
+  // and per splat the rotation (w, x, y, z) that took its canonical frame to the posed one, which the SH view
+  // direction is rotated back through so the colour is looked up in the frame it was trained in.
+  const float4* quat_override = nullptr;
+  const float4* lscale_override = nullptr;
+  const float4* sh_frame = nullptr;
+  // Pose-dependent appearance (gpu/cage_app.h): per splat (target rgb, alpha); the SH colour c becomes
+  // c + alpha (t - c). `col_base` (optional) receives c.
+  const float4* app = nullptr;
+  float4* col_base = nullptr;
+  bool app_add = false;   // gpu/cage_open.h: app holds (delta rgb, g) and the colour becomes c + g delta (the SH detail survives)
   // Hollow loss: per-pixel reference depth of the body surface (camera z, +inf = no surface). A fragment at depth z
   // is penalised by h(z) = clamp((z - z_ref - margin) / margin, 0, 1) times its compositing weight; the gradient of
   // that weight runs through every fragment in front of it, which is what pushes the surface opaque.

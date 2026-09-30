@@ -243,6 +243,7 @@ __global__ void kill_slots_kernel(int count, const uint32_t* idx, float4* pos) {
 
 RefineStats RefineState::run(Model& m, RenderCtx& ctx, const RefineParams& p, cudaStream_t stream) {
   RefineStats stats;
+  last_pairs = 0;
   int n = m.n;
   if (n == 0) return stats;
   refine_count++;
@@ -314,6 +315,7 @@ RefineStats RefineState::run(Model& m, RenderCtx& ctx, const RefineParams& p, cu
     if (appended) append_slots_kernel<<<div_up(appended, 256), 256, 0, stream>>>(appended, (uint32_t)n, sel_child.ptr + from_dead);
     if (m.cap > (int)ctx.tile_count.count) ctx.setup(ctx.W, ctx.H, m.cap, stream);
     if (appended) CUDA_CHECK(cudaMemsetAsync(ctx.tile_count.ptr + n, 0, appended * sizeof(uint32_t), stream));
+    last_pairs = n_sel;
 #define SK(K) split_kernel<K><<<div_up(n_sel, 256), 256, 0, stream>>>(n_sel, sel_parent, sel_child, m.pos_op, m.quat, m.lscale, m.sh(), m.m_pos_op, m.v_pos_op, m.m_quat, m.v_quat, m.m_lscale, m.v_lscale, m.m_sh(), m.v_sh, m.refine_norm, m.max_screen, m.vis_count, ctx.tile_count, m.last_step, p.split_at_screen_size)
     switch (m.degree) { case 0: SK(3); break; case 1: SK(12); break; case 2: SK(27); break; case 3: SK(48); break; default: SK(75); break; }
 #undef SK

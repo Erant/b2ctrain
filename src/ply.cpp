@@ -19,6 +19,10 @@ void SplatCloud::resize(size_t count, int degree) {
   for (size_t i = 0; i < n; i++) quat[i * 4] = 1.f;
   if (has_evidence) evidence.assign(n * 7, 0.f);
   if (has_labels) labels.assign(n * 2, 0.f);
+  if (has_fill) fill.assign(n, 0.f);
+  if (has_gate) gate.assign(n * 2, -1.f);
+  if (has_gate_s) gate_s.assign(n, 0.f);
+  if (has_open) open.assign(n * 4, 0.f);
 }
 
 namespace {
@@ -131,6 +135,10 @@ SplatCloud read_ply(const std::string& path) {
   SplatCloud c;
   c.has_evidence = has("ev_w_in");
   c.has_labels = has("seg_label");
+  c.has_fill = has("cage_fill");
+  c.has_gate = has("cage_gate_a") && has("cage_gate_b");
+  c.has_gate_s = c.has_gate && has("cage_gate_s");
+  c.has_open = has("open_r") && has("open_g") && has("open_b") && has("open_dopacity");
   c.resize(n_vertex, degree);
   c.has_scales = has("scale_0");
   bool has_rgb = has("red") || has("r");
@@ -156,8 +164,20 @@ SplatCloud read_ply(const std::string& path) {
         c.sh[(i * K + k) * 3 + ch] = (float)at(i, format("f_rest_%d", ch * (K - 1) + (k - 1)).c_str());
     if (c.has_evidence) for (int k = 0; k < 7; k++) c.evidence[i * 7 + k] = (float)at(i, EVIDENCE_FIELDS[k]);
     if (c.has_labels) { c.labels[i * 2] = (float)at(i, "seg_label"); c.labels[i * 2 + 1] = has("seg_conf") ? (float)at(i, "seg_conf") : 1.f; }
+    if (c.has_fill) c.fill[i] = (float)at(i, "cage_fill");
+    if (c.has_gate) { c.gate[i * 2] = (float)at(i, "cage_gate_a"); c.gate[i * 2 + 1] = (float)at(i, "cage_gate_b"); }
+    if (c.has_gate_s) c.gate_s[i] = (float)at(i, "cage_gate_s");
+    if (c.has_open) { c.open[i * 4] = (float)at(i, "open_r"); c.open[i * 4 + 1] = (float)at(i, "open_g"); c.open[i * 4 + 2] = (float)at(i, "open_b"); c.open[i * 4 + 3] = (float)at(i, "open_dopacity"); }
   }
   return c;
+}
+
+std::vector<std::string> read_ply_comments(const std::string& path) {
+  std::vector<std::string> out;
+  std::ifstream f(path, std::ios::binary); std::string line;
+  while (std::getline(f, line) && line != "end_header")
+    if (line.rfind("comment ", 0) == 0) out.push_back(line.substr(8));
+  return out;
 }
 
 void write_ply(const std::string& path, const SplatCloud& c, const std::vector<std::string>& comments) {
@@ -172,9 +192,13 @@ void write_ply(const std::string& path, const SplatCloud& c, const std::vector<s
   for (int k = 0; k < 3 * (K - 1); k++) h += format("property float f_rest_%d\n", k);
   if (c.has_evidence) for (auto e : EVIDENCE_FIELDS) h += format("property float %s\n", e);
   if (c.has_labels) for (auto e : LABEL_FIELDS) h += format("property float %s\n", e);
+  if (c.has_fill) h += "property float cage_fill\n";
+  if (c.has_gate) h += "property float cage_gate_a\nproperty float cage_gate_b\n";
+  if (c.has_gate_s) h += "property float cage_gate_s\n";
+  if (c.has_open) h += "property float open_r\nproperty float open_g\nproperty float open_b\nproperty float open_dopacity\n";
   h += "end_header\n";
   f.write(h.data(), h.size());
-  size_t row_len = 14 + 3 * (K - 1) + (c.has_evidence ? 7 : 0) + (c.has_labels ? 2 : 0);
+  size_t row_len = 14 + 3 * (K - 1) + (c.has_evidence ? 7 : 0) + (c.has_labels ? 2 : 0) + (c.has_fill ? 1 : 0) + (c.has_gate ? 2 : 0) + (c.has_gate_s ? 1 : 0) + (c.has_open ? 4 : 0);
   std::vector<float> row(row_len);
   std::vector<float> buf; buf.reserve(row_len * 4096);
   for (size_t i = 0; i < c.n; i++) {
@@ -190,6 +214,10 @@ void write_ply(const std::string& path, const SplatCloud& c, const std::vector<s
     for (int ch = 0; ch < 3; ch++) for (int k = 1; k < K; k++) r[o++] = c.sh[(i * K + k) * 3 + ch];
     if (c.has_evidence) for (int k = 0; k < 7; k++) r[o++] = c.evidence[i * 7 + k];
     if (c.has_labels) { r[o++] = c.labels[i * 2]; r[o++] = c.labels[i * 2 + 1]; }
+    if (c.has_fill) r[o++] = c.fill[i];
+    if (c.has_gate) { r[o++] = c.gate[i * 2]; r[o++] = c.gate[i * 2 + 1]; }
+    if (c.has_gate_s) r[o++] = c.gate_s[i];
+    if (c.has_open) for (int k = 0; k < 4; k++) r[o++] = c.open[i * 4 + k];
     buf.insert(buf.end(), row.begin(), row.end());
     if (buf.size() >= row_len * 4096) { f.write((const char*)buf.data(), buf.size() * 4); buf.clear(); }
   }

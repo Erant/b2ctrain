@@ -1,4 +1,5 @@
 #include "train/evidence.h"
+#include "gpu/cage.h"
 #include "gpu/deform.h"
 #include "gpu/splat_math.cuh"
 
@@ -197,7 +198,7 @@ __global__ void __launch_bounds__(RT_PX) label_vote_kernel(
 }  // namespace
 
 void compute_evidence(RenderCtx& ctx, const Model& m, const std::vector<ViewGPU>& views, const std::vector<Camera>& cams, const Config& cfg, cudaStream_t stream,
-                      BodyRig* rig, const std::vector<int>* rig_views) {
+                      BodyRig* rig, const std::vector<int>* rig_views, CageRig* cage, const std::vector<int>* cage_views) {
   g_evidence.reserve((size_t)m.n * EV_ACC); g_evidence.zero(stream);
   g_view_acc.reserve((size_t)m.n * 3);
   bool use_normals = cfg.evidence_normal_weight > 0.f;
@@ -209,6 +210,10 @@ void compute_evidence(RenderCtx& ctx, const Model& m, const std::vector<ViewGPU>
     RenderParams rp; rp.cam = CameraGPU::from(cams[v], view.W, view.H);
     rp.warp = view.warp; rp.warp_w = view.warp_w; rp.warp_h = view.warp_h;
     if (rig && rig_views && (*rig_views)[v] >= 0) { rig->pose((*rig_views)[v], m, stream); rp.pos_override = rig->pos_view; }
+    if (cage && cage_views && (*cage_views)[v] >= 0) {
+      cage->pose((*cage_views)[v], m, stream);
+      rp.pos_override = cage->pos_view; rp.quat_override = cage->quat_view; rp.lscale_override = cage->lscale_view; rp.sh_frame = cage->sh_frame;
+    }
     rp.sh_degree = m.degree; rp.bwd_info = true;
     rp.feat = (use_normals && view.normals) ? FeatureMode::Normals : FeatureMode::None;
     render_forward(ctx, m, rp, stream);

@@ -147,20 +147,25 @@ __global__ void __launch_bounds__(128) optim_kernel(
 
   if (any) {
     const float4 pv = op.pos_override ? op.pos_override[i] : po;
-    ProjIntermediates pr = project_one(pv, q, ls, cam, op.mip);
+    const float4 qv = op.quat_override ? op.quat_override[i] : q;
+    const float4 lsv = op.lscale_override ? op.lscale_override[i] : ls;
+    ProjIntermediates pr = project_one(pv, qv, lsv, cam, op.mip);
     if (pr.ok) {
       float3 mean = make_float3(pv.x, pv.y, pv.z);
       float3 campos = make_float3(cam.pos[0], cam.pos[1], cam.pos[2]);
       // SH
       float3 u = mean - campos; float ul = len3(u); float3 v = u * (1.f / ul);
-      sh_basis<DEG>(v, basis);
+      // With a cage the SH are looked up at the view direction in the splat's canonical frame, vs = R^T v.
+      const float3 vs = op.sh_frame ? quat_rotate_inv(op.sh_frame[i], v) : v;
+      sh_basis<DEG>(vs, basis);
       vc = make_float3(g[5], g[6], g[7]);
       {
         int kmax = (op.active_sh_degree + 1) * (op.active_sh_degree + 1);
 #pragma unroll
         for (int k = 0; k < K; k++) if (k >= kmax) basis[k] = 0.f;
       }
-      float3 v_v = sh_viewdir_vjp<DEG>(shb, i, v, vc, op.active_sh_degree);
+      float3 v_v = sh_viewdir_vjp<DEG>(shb, i, vs, vc, op.active_sh_degree);
+      if (op.sh_frame) v_v = quat_rotate(op.sh_frame[i], v_v);
       float vdot = dot3(v, v_v);
       float3 v_mean_sh = (v_v - v * vdot) * (1.f / ul);
       // Opacity
@@ -211,7 +216,7 @@ __global__ void __launch_bounds__(128) optim_kernel(
       for (int k = 0; k < 9; k++) v_M.m[k] *= 2.f;
       g_pos = mat3_tmul(Rv, v_mean_c) + v_mean_sh;
       // scales: v_s_i = Rq.col_i . v_M.col_i ; chain through s_eff = sqrt(exp(2l) + f^2)
-      float f2 = ls.w * ls.w;
+      float f2 = lsv.w * lsv.w;
       float vs0 = pr.Rq.m[0] * v_M.m[0] + pr.Rq.m[3] * v_M.m[3] + pr.Rq.m[6] * v_M.m[6];
       float vs1 = pr.Rq.m[1] * v_M.m[1] + pr.Rq.m[4] * v_M.m[4] + pr.Rq.m[7] * v_M.m[7];
       float vs2 = pr.Rq.m[2] * v_M.m[2] + pr.Rq.m[5] * v_M.m[5] + pr.Rq.m[8] * v_M.m[8];
@@ -221,14 +226,14 @@ __global__ void __launch_bounds__(128) optim_kernel(
       // quaternion: v_R = v_M diag(s)
       Mat3 vR;
       for (int r = 0; r < 3; r++) { vR.m[r * 3] = v_M.m[r * 3] * pr.s.x; vR.m[r * 3 + 1] = v_M.m[r * 3 + 1] * pr.s.y; vR.m[r * 3 + 2] = v_M.m[r * 3 + 2] * pr.s.z; }
-      float qn2 = q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w; float inv_qn = rsqrtf(qn2);
-      float4 qn = make_float4(q.x * inv_qn, q.y * inv_qn, q.z * inv_qn, q.w * inv_qn);
+      float qn2 = qv.x * qv.x + qv.y * qv.y + qv.z * qv.z + qv.w * qv.w; float inv_qn = rsqrtf(qn2);
+      float4 qn = make_float4(qv.x * inv_qn, qv.y * inv_qn, qv.z * inv_qn, qv.w * inv_qn);
       float4 qg = quat_to_mat_vjp(qn, vR);
-      g_q = apply_normalize_vjp(q, qg);
+      g_q = apply_normalize_vjp(qv, qg);
       // Feature (normal) gradient -> quaternion, when the feature was the pseudo-normal.
       // feat = Rv * (face * u), u = Rq.col(axis)/|.|; d feat / d Rq.col(axis) = Rv * face * (I - u u^T)/|a|.
       if (g[10] != 0.f || g[11] != 0.f || g[12] != 0.f) {
-        int axis = (ls.x <= ls.y && ls.x <= ls.z) ? 0 : (ls.y <= ls.z ? 1 : 2);
+        int axis = (lsv.x <= lsv.y && lsv.x <= lsv.z) ? 0 : (lsv.y <= lsv.z ? 1 : 2);
         float3 a = axis == 0 ? make_float3(pr.Rq.m[0], pr.Rq.m[3], pr.Rq.m[6]) : (axis == 1 ? make_float3(pr.Rq.m[1], pr.Rq.m[4], pr.Rq.m[7]) : make_float3(pr.Rq.m[2], pr.Rq.m[5], pr.Rq.m[8]));
         float al = fmaxf(len3(a), 1e-12f); float3 uu = a * (1.f / al);
         float face = dot3(campos - mean, uu) >= 0.f ? 1.f : -1.f;
@@ -240,7 +245,7 @@ __global__ void __launch_bounds__(128) optim_kernel(
         else if (axis == 1) { vRn.m[1] = va.x; vRn.m[4] = va.y; vRn.m[7] = va.z; }
         else { vRn.m[2] = va.x; vRn.m[5] = va.y; vRn.m[8] = va.z; }
         float4 qg2 = quat_to_mat_vjp(qn, vRn);
-        float4 gq2 = apply_normalize_vjp(q, qg2);
+        float4 gq2 = apply_normalize_vjp(qv, qg2);
         g_q.x += gq2.x; g_q.y += gq2.y; g_q.z += gq2.z; g_q.w += gq2.w;
       }
       bool ok = finite3(g_pos) && isfinite(g_op) && finite3(g_ls) && isfinite(g_q.x + g_q.y + g_q.z + g_q.w);
@@ -257,7 +262,33 @@ __global__ void __launch_bounds__(128) optim_kernel(
     float gs = op.spa_rho * (sig * comp - op.spa_z[i] + op.spa_u[i]) * comp * sig * (1.f - sig);
     if (isfinite(gs)) g_op += gs;
   }
+  if (op.g_app_out && any) op.g_app_out[i] = make_float2(g_op, g_ls.x + g_ls.y + g_ls.z);
+  if (op.stretch_w && any) {
+    const float w = op.stretch_w[i];
+    if (w > 0.f) {
+      if (ls.x > op.stretch_log_tau) g_ls.x += w;
+      if (ls.y > op.stretch_log_tau) g_ls.y += w;
+      if (ls.z > op.stretch_log_tau) g_ls.z += w;
+    }
+  }
   if (op.g_pos_out) op.g_pos_out[i] = g_pos;
+  if (op.frozen) return;
+  if (op.update_mask && !op.update_mask[i]) return;
+  if (op.canon_rot) {
+    const float4 r = op.canon_rot[i];                 // (w, x, y, z) as float4(x=w, y=x, z=y, w=z)
+    const float w = r.x, x = r.y, y = r.z, z = r.w;
+    // R(r)^T g
+    const float R00 = 1 - 2 * (y * y + z * z), R01 = 2 * (x * y - z * w), R02 = 2 * (x * z + y * w);
+    const float R10 = 2 * (x * y + z * w), R11 = 1 - 2 * (x * x + z * z), R12 = 2 * (y * z - x * w);
+    const float R20 = 2 * (x * z - y * w), R21 = 2 * (y * z + x * w), R22 = 1 - 2 * (x * x + y * y);
+    g_pos = make_float3(R00 * g_pos.x + R10 * g_pos.y + R20 * g_pos.z, R01 * g_pos.x + R11 * g_pos.y + R21 * g_pos.z,
+                        R02 * g_pos.x + R12 * g_pos.y + R22 * g_pos.z);
+    // conj(r) * g_q (Hamilton, g_q held like the quaternions)
+    const float cw = w, cx = -x, cy = -y, cz = -z;
+    const float gw = g_q.x, gx = g_q.y, gy = g_q.z, gz = g_q.w;
+    g_q = make_float4(cw * gw - cx * gx - cy * gy - cz * gz, cw * gx + cx * gw + cy * gz - cz * gy,
+                      cw * gy - cx * gz + cy * gw + cz * gx, cw * gz + cx * gy - cy * gx + cz * gw);
+  }
   if (op.grad_out) {
     float* o = op.grad_out + (size_t)i * (11 + K * 3);
     o[0] = g_pos.x; o[1] = g_pos.y; o[2] = g_pos.z; o[3] = g_op; o[4] = g_q.x; o[5] = g_q.y; o[6] = g_q.z; o[7] = g_q.w; o[8] = g_ls.x; o[9] = g_ls.y; o[10] = g_ls.z;

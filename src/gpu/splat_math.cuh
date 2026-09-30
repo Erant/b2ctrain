@@ -52,6 +52,16 @@ __device__ __forceinline__ TileBox tile_bbox(float mx, float my, float ex, float
   return b;
 }
 
+// R(q)^T v for a (w, x, y, z) quaternion (normalised here): the view direction in a splat's canonical frame.
+__device__ __forceinline__ float3 quat_rotate_inv(float4 q, float3 v) {
+  float n = rsqrtf(q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w);
+  return mat3_tmul(quat_to_mat(make_float4(q.x * n, q.y * n, q.z * n, q.w * n)), v);
+}
+__device__ __forceinline__ float3 quat_rotate(float4 q, float3 v) {
+  float n = rsqrtf(q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w);
+  return mat3_mul(quat_to_mat(make_float4(q.x * n, q.y * n, q.z * n, q.w * n)), v);
+}
+
 // Spherical harmonics (Sloan basis), coefficient-major [K][3]. Returns colour without the +0.5 offset.
 #define SHC(k, ch) sb.get((k) * 3 + (ch), i)
 #define SH3(k) make_float3(SHC(k, 0), SHC(k, 1), SHC(k, 2))

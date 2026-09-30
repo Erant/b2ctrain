@@ -7,7 +7,7 @@ namespace {
 
 template <int DEG, int FEAT>  // FEAT: 0 none, 1 normals, 2 buffer
 __global__ void project_kernel(int n, const float4* __restrict__ pos_op, const float4* __restrict__ quat, const float4* __restrict__ lscale,
-                               ShBuf sb, const float* __restrict__ feat_in, CamDev cam, bool mip,
+                               const float4* __restrict__ sh_frame, const float4* __restrict__ app, float4* __restrict__ col_base, bool app_add, ShBuf sb, const float* __restrict__ feat_in, CamDev cam, bool mip,
                                const float2* __restrict__ warp, int warp_w, int warp_h,
                                int tiles_x, int tiles_y,
                                float4* __restrict__ proj0, float4* __restrict__ proj1, float4* __restrict__ proj2, float2* __restrict__ proj3,
@@ -46,12 +46,19 @@ __global__ void project_kernel(int n, const float4* __restrict__ pos_op, const f
   // Colour from SH, view direction camera -> splat.
   float3 v = mean - campos;
   float vl = len3(v); v = v * (1.f / fmaxf(vl, 1e-12f));
+  if (sh_frame) v = quat_rotate_inv(sh_frame[i], v);
   constexpr int K = (DEG + 1) * (DEG + 1);
   float3 col = sh_eval<DEG>(sb, i, v, active_deg);
   float cr = col.x + 0.5f, cg = col.y + 0.5f, cb = col.z + 0.5f;
   cr = isfinite(cr) ? fminf(fmaxf(cr, -100.f), 100.f) : 0.f;
   cg = isfinite(cg) ? fminf(fmaxf(cg, -100.f), 100.f) : 0.f;
   cb = isfinite(cb) ? fminf(fmaxf(cb, -100.f), 100.f) : 0.f;
+  if (app) {   // pose-dependent appearance (gpu/cage_app.h): blend towards the target colour by alpha
+    if (col_base) col_base[i] = make_float4(cr, cg, cb, 0.f);
+    float4 a = app[i];
+    if (app_add) { cr += a.w * a.x; cg += a.w * a.y; cb += a.w * a.z; }
+    else { cr += a.w * (a.x - cr); cg += a.w * (a.y - cg); cb += a.w * (a.z - cb); }
+  }
   float3 feat = make_float3(0.f, 0.f, 0.f);
   if constexpr (FEAT == 1) {
     // Pseudo-normal: shortest-scale local axis of R(q), camera-facing, in camera space.
@@ -81,13 +88,15 @@ void launch_deg(RenderCtx& ctx, const Model& m, const RenderParams& p, const Cam
   int blocks = div_up(m.n, PROJ_BLOCK);
   float* ms = m.max_screen.ptr;
   const float4* pos = p.pos_override ? p.pos_override : m.pos_op.ptr;
+  const float4* quat = p.quat_override ? p.quat_override : m.quat.ptr;
+  const float4* lscale = p.lscale_override ? p.lscale_override : m.lscale.ptr;
   switch (p.feat) {
     case FeatureMode::None:
-      project_kernel<DEG, 0><<<blocks, PROJ_BLOCK, 0, stream>>>(m.n, pos, m.quat, m.lscale, m.sh(), nullptr, cam, p.mip, p.warp, p.warp_w, p.warp_h, ctx.tiles_x, ctx.tiles_y, ctx.proj0, ctx.proj1, ctx.proj2, ctx.proj3, ctx.tile_count, ctx.hit_info, ms, p.sh_degree); break;
+      project_kernel<DEG, 0><<<blocks, PROJ_BLOCK, 0, stream>>>(m.n, pos, quat, lscale, p.sh_frame, p.app, p.col_base, p.app_add, m.sh(), nullptr, cam, p.mip, p.warp, p.warp_w, p.warp_h, ctx.tiles_x, ctx.tiles_y, ctx.proj0, ctx.proj1, ctx.proj2, ctx.proj3, ctx.tile_count, ctx.hit_info, ms, p.sh_degree); break;
     case FeatureMode::Normals:
-      project_kernel<DEG, 1><<<blocks, PROJ_BLOCK, 0, stream>>>(m.n, pos, m.quat, m.lscale, m.sh(), nullptr, cam, p.mip, p.warp, p.warp_w, p.warp_h, ctx.tiles_x, ctx.tiles_y, ctx.proj0, ctx.proj1, ctx.proj2, ctx.proj3, ctx.tile_count, ctx.hit_info, ms, p.sh_degree); break;
+      project_kernel<DEG, 1><<<blocks, PROJ_BLOCK, 0, stream>>>(m.n, pos, quat, lscale, p.sh_frame, p.app, p.col_base, p.app_add, m.sh(), nullptr, cam, p.mip, p.warp, p.warp_w, p.warp_h, ctx.tiles_x, ctx.tiles_y, ctx.proj0, ctx.proj1, ctx.proj2, ctx.proj3, ctx.tile_count, ctx.hit_info, ms, p.sh_degree); break;
     case FeatureMode::Buffer:
-      project_kernel<DEG, 2><<<blocks, PROJ_BLOCK, 0, stream>>>(m.n, pos, m.quat, m.lscale, m.sh(), p.feat_buffer, cam, p.mip, p.warp, p.warp_w, p.warp_h, ctx.tiles_x, ctx.tiles_y, ctx.proj0, ctx.proj1, ctx.proj2, ctx.proj3, ctx.tile_count, ctx.hit_info, ms, p.sh_degree); break;
+      project_kernel<DEG, 2><<<blocks, PROJ_BLOCK, 0, stream>>>(m.n, pos, quat, lscale, p.sh_frame, p.app, p.col_base, p.app_add, m.sh(), p.feat_buffer, cam, p.mip, p.warp, p.warp_w, p.warp_h, ctx.tiles_x, ctx.tiles_y, ctx.proj0, ctx.proj1, ctx.proj2, ctx.proj3, ctx.tile_count, ctx.hit_info, ms, p.sh_degree); break;
   }
   CUDA_KERNEL_CHECK();
 }

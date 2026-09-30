@@ -45,15 +45,20 @@ add_library(b2c_core STATIC
   src/gpu/loss.cu
   src/gpu/optim.cu
   src/gpu/deform.cu
+  src/gpu/cage.cu
+  src/gpu/cage_app.cu
+  src/gpu/cage_open.cu
   src/gpu/refine.cu
   src/gpu/sparsify.cu
   src/gpu/images.cu
   src/gpu/align.cu
   src/gpu/meshdepth.cu
   src/gpu/probe.cu
+  src/gpu/pose_contain.cu
   src/train/trainer.cpp
   src/train/init.cpp
   src/train/evidence.cu
+  src/train/fit_cage.cu
   src/render/renderer.cpp
   src/render/confidence.cu
   src/render/probe.cpp
@@ -121,6 +126,6 @@ add_executable(b2ctrain src/main.cpp)
 target_link_libraries(b2ctrain PRIVATE b2c_core)
 
 enable_testing()
-add_executable(b2c_tests tests/tests.cpp tests/reference.cpp tests/mesh_tests.cpp)
+add_executable(b2c_tests tests/tests.cpp tests/reference.cpp tests/mesh_tests.cpp tests/cage_app_tests.cpp)
 target_link_libraries(b2c_tests PRIVATE b2c_core)
 add_test(NAME b2c_tests COMMAND b2c_tests)

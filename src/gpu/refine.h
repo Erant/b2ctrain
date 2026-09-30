@@ -31,6 +31,7 @@ struct RefineState {
   PinnedBuf<float> h_bounds;
   int refine_count = 0;
   DevBuf<uint32_t> cull_flag;
+  uint32_t last_pairs = 0;   // sel_parent[k] -> sel_child[k], k < last_pairs: the splats the last run() wrote from a parent
 
   void init(const Model& m, cudaStream_t stream);
   void set_cameras(const std::vector<float>& pos, const std::vector<float>& focal);

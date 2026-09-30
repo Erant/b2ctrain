@@ -8,9 +8,11 @@
 namespace b2c {
 // Per-splat multi-view evidence: [n][7] = w_in, w_all, err, views, dir xyz. Kept in a module-level buffer.
 struct BodyRig;
+struct CageRig;
 // `rig` + `rig_views` (per view, the rig's view index or -1): render each view from its posed means (gpu/deform.h).
 void compute_evidence(RenderCtx& ctx, const Model& m, const std::vector<ViewGPU>& views, const std::vector<Camera>& cams, const Config& cfg, cudaStream_t stream,
-                      BodyRig* rig = nullptr, const std::vector<int>* rig_views = nullptr);
+                      BodyRig* rig = nullptr, const std::vector<int>* rig_views = nullptr,
+                      CageRig* cage = nullptr, const std::vector<int>* cage_views = nullptr);   // cage: per view its frame or -1
 std::vector<float> download_evidence(const Model& m, cudaStream_t stream);
 // The device accumulator of the last compute_evidence: [n][*stride], w_all at offset 1 (GaussianSpa's importance).
 const float* evidence_device(int* stride);

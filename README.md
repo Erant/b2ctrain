@@ -39,6 +39,9 @@ cmake --build build
   writes Sapiens2 Goliath ids) is voted onto the splats in the evidence replay — each splat's rendered weight on each
   class's pixels, summed over the training views — and the winner and its share land in the ply as two extra float
   properties, `seg_label` and `seg_conf`, after the `ev_*` block. Viewers that read brush's layout ignore them.
+- Cage-posed training and rendering for b2crig, which animates a trained subject (`--cage`, `render --cage`,
+  `fit-cage`; `src/gpu/cage.h`). b2crig makes every decision about the rig and hands it over as files; this repo
+  poses, renders and trains. See `docs/b2crig-boundary.md` for what lives where.
 
 ## Recipes
 

@@ -22,6 +22,14 @@ struct SplatCloud {
   std::vector<float> evidence;   // [n][7]: w_in, w_all, err, views (effective count, see evidence.cu), dir xyz
   bool has_labels = false;
   std::vector<float> labels;     // [n][2]: seg_label (class id, integer-valued), seg_conf (winner's share, 0..1)
+  bool has_fill = false;
+  std::vector<float> fill;       // [n]: cage_fill; > 0 fades IN with cage stretch, < 0 fades out on its gate face (gpu/cage.h)
+  bool has_gate = false;
+  std::vector<float> gate;       // [n][2]: cage_gate_a / _b, a cage vertex pair whose distance ratio (posed / canonical) gates the splat's fade (-1 = its own face's stretch)
+  bool has_gate_s = false;
+  std::vector<float> gate_s;     // [n]: cage_gate_s, the pair's reference separation (m): the gate reads (posed - canonical distance) / gate_s instead of the ratio (0 = ratio)
+  bool has_open = false;
+  std::vector<float> open;       // [n][4]: open_r, open_g, open_b (colour 0..1), open_dopacity: the splat's second, "open crease" state (gpu/cage_open.h)
 
   int K() const { return sh_coeffs_for_degree(sh_degree); }
   void resize(size_t count, int degree);
@@ -36,6 +44,8 @@ extern const char* const LABEL_FIELDS[2];
 bool ply_is_vertex_only(const std::string& path);
 
 SplatCloud read_ply(const std::string& path);
+// The "comment ..." lines of a ply header (without the "comment " prefix).
+std::vector<std::string> read_ply_comments(const std::string& path);
 void write_ply(const std::string& path, const SplatCloud& c, const std::vector<std::string>& comments);
 
 }  // namespace b2c
