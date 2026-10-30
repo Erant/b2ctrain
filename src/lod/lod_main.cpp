@@ -27,7 +27,9 @@ const char* MERGE_HELP =
 "      --cage CAGE              Distance cap (b2crig's cage file, gpu/cage.h): a merge whose extent (3 sigma along its\n"
 "                               major axis) exceeds K x the mean edge length of the cage face nearest its mean (the\n"
 "                               face the binding would pick: the layer that owns the class, else any) is not made\n"
-"      --max-extent-faces K     The cap's K; 0 = no cap [default: 3]\n";
+"      --max-extent-faces K     The cap's K; 0 = no cap [default: 3]\n"
+"      --cage-min-conf C        A merge whose group-minimum seg_conf is under C measures against the nearest face of\n"
+"                               any layer, as the binding does (pass the binding's value) [default: 0.5]\n";
 
 const char* DISTILL_HELP =
 "Fine-tune a merged LOD level against the full splat's renders\n\n"
@@ -49,6 +51,7 @@ const char* DISTILL_HELP =
 
 int lod_merge_main(int argc, char** argv) {
   std::string splat, out, cage_path;
+  float min_conf = 0.5f;
   long long count = -1; float k = 3.f;
   for (int i = 2; i < argc; i++) {
     std::string a = argv[i];
@@ -59,6 +62,7 @@ int lod_merge_main(int argc, char** argv) {
     else if (a == "--out") out = val();
     else if (a == "--cage") cage_path = val();
     else if (a == "--max-extent-faces") k = (float)atof(val().c_str());
+    else if (a == "--cage-min-conf") min_conf = (float)atof(val().c_str());
     else fail("lod-merge: unexpected argument '%s'", a.c_str());
   }
   if (splat.empty() || out.empty() || count < 1) fail("lod-merge needs --splat, --count (>= 1) and --out (see --help)");
@@ -69,7 +73,7 @@ int lod_merge_main(int argc, char** argv) {
   if (in.has_evidence || in.has_fill || in.has_gate || in.has_open)
     log_info("Dropped per-splat state: %s%s%s%s", in.has_evidence ? "evidence " : "", in.has_fill ? "cage_fill " : "", in.has_gate ? "cage_gate_* " : "", in.has_open ? "open_* " : "");
 
-  MergeParams p; p.count = (size_t)count; p.max_extent_faces = k;
+  MergeParams p; p.count = (size_t)count; p.max_extent_faces = k; p.min_conf = min_conf;
   CageFaces cf;
   if (!cage_path.empty() && k > 0.f) {
     CageRig cage;
@@ -80,7 +84,7 @@ int lod_merge_main(int argc, char** argv) {
     cf.face_layer = cage.face_layer_h;
     for (auto& L : cage.layers) { cf.layer_classes.push_back(L.class_bits); cf.layer_v_off.push_back(L.v_off); cf.layer_v_count.push_back(L.v_count); }
     p.cage = &cf;
-    log_info("Cage cap: %s, %zu layers, %d triangles; a merge may span at most %g x the mean edge of its nearest face", cage_path.c_str(), cage.layers.size(), cage.nf, k);
+    log_info("Cage cap: %s, %zu layers, %d triangles; a merge may span at most %g x the mean edge of the face it would bind to (min conf %g)", cage_path.c_str(), cage.layers.size(), cage.nf, k, min_conf);
   } else if (!cage_path.empty()) {
     log_info("--max-extent-faces 0: the cage cap is off");
   }

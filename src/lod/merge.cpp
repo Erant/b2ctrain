@@ -294,7 +294,8 @@ double closest_on_tri_d2(const double* p, const float* a, const float* b, const 
 }
 
 // The face a splat at p with class `label` would bind to (gpu/cage.cu: nearest vertex of the layer that owns the
-// class, else of any layer, then the nearest of the triangles around it), and its mean edge length.
+// class, else of any layer, any layer too when its seg_conf is under the binding's min_conf, then the nearest of the
+// triangles around it), and its mean edge length.
 struct CapIndex {
   const CageFaces* cf = nullptr;
   std::vector<KdTree> trees;          // per layer, plus one over every layer's vertices last
@@ -325,10 +326,10 @@ struct CapIndex {
     }
     trees[nl].build(c.verts.data(), std::move(all));
   }
-  double face_edge(const double p[3], int label) const {
+  double face_edge(const double p[3], int label, bool confident) const {
     const int nl = (int)cf->layer_classes.size();
     int owner = nl;
-    if (label >= 0 && label < 32) for (int l = 0; l < nl; l++) if (cf->layer_classes[l] & (1u << label)) { owner = l; break; }
+    if (confident && label >= 0 && label < 32) for (int l = 0; l < nl; l++) if (cf->layer_classes[l] & (1u << label)) { owner = l; break; }
     std::vector<std::pair<float, int>> h;
     float q[3] = {(float)p[0], (float)p[1], (float)p[2]};
     trees[owner].knn(q, 1, -1, h);
@@ -426,7 +427,9 @@ SplatCloud lod_merge(const SplatCloud& in, const MergeParams& p, MergeStats* sta
       double w[8], W, mu[3], S[9];
       group_moments(v, m, n, w, W, mu, S);
       double e0, e1, e2; eig_smith(S[0], S[1], S[2], S[4], S[5], S[8], e0, e1, e2);
-      return 3 * std::sqrt(std::max(e0, 0.0)) <= p.max_extent_faces * cap.face_edge(mu, label_of(cur, m[0]));
+      float conf = 1.f;   // the merged splat's seg_conf: the group minimum
+      if (cur.has_labels) for (int k = 0; k < n; k++) conf = std::min(conf, cur.labels[(size_t)m[k] * 2 + 1]);
+      return 3 * std::sqrt(std::max(e0, 0.0)) <= p.max_extent_faces * cap.face_edge(mu, label_of(cur, m[0]), !cur.has_labels || conf >= p.min_conf);
     };
     std::vector<int> cand_idx(N * CAND_K, -1);
     std::vector<float> cand_cost(N * CAND_K, INFINITY);
@@ -494,7 +497,14 @@ SplatCloud lod_merge(const SplatCloud& in, const MergeParams& p, MergeStats* sta
       }
     }
     size_t held = 0;
-    for (size_t i = 0; i < N; i++) held += capped[i] && group_of[i] < 0;
+    std::map<int, size_t> held_by_class;
+    for (size_t i = 0; i < N; i++) if (capped[i] && group_of[i] < 0) { held++; held_by_class[label_of(cur, i)]++; }
+    std::string held_top;   // the classes the cap keeps whole, most first
+    {
+      std::vector<std::pair<size_t, int>> v; for (auto& [c, k] : held_by_class) v.emplace_back(k, c);
+      std::sort(v.rbegin(), v.rend());
+      for (size_t t = 0; t < v.size() && t < 6; t++) held_top += format("%s%d:%zu", t ? " " : "", v[t].second, v[t].first);
+    }
     st.cap_blocked += blocked; st.cap_held = held;
     if (removed == 0) fail("lod-merge: no valid merges at %zu splats (target %zu)%s", N, p.count, p.cage ? "; the cage cap blocks every candidate" : "");
     if (removed < needed && (double)removed / N < MIN_ITERATION_PROGRESS)
@@ -521,7 +531,7 @@ SplatCloud lod_merge(const SplatCloud& in, const MergeParams& p, MergeStats* sta
     }
     size_t sizes[5] = {0, 0, 0, 0, 0}; for (auto& g : groups) sizes[std::min<size_t>(g.size(), 4)]++;
     log_info("lod-merge generation %d: %zu -> %zu splats (%zu groups: %zu pairs, %zu of 3, %zu of 4)%s; costs %.2fs, total %.2fs",
-             st.generations, N, next.n, groups.size(), sizes[2], sizes[3], sizes[4], p.cage ? format("; the cage cap ruled out %zu merges and kept %zu splats whole", blocked, held).c_str() : "",
+             st.generations, N, next.n, groups.size(), sizes[2], sizes[3], sizes[4], p.cage ? format("; the cage cap ruled out %zu merges and kept %zu splats whole (class:count %s)", blocked, held, held_top.c_str()).c_str() : "",
              t_cost, now_seconds() - t0);
     cur = std::move(next);
   }

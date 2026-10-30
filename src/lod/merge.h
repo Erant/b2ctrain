@@ -15,7 +15,8 @@
 //
 // b2c's merge rules, inside the merge: neighbours are searched within a seg_label class only, so no group crosses a
 // class; a merged splat's seg_conf is its group's minimum; with a cage, a group whose merged extent (3 sigma along the
-// major axis) exceeds `max_extent_faces` times the mean edge length of the cage face nearest its mean is not formed:
+// major axis) exceeds `max_extent_faces` times the mean edge length of the cage face its mean would bind to is not
+// formed (CageRig::bind: the layer owning its class, or any layer when its group-minimum seg_conf is under `min_conf`):
 // a capped pair leaves the splat's candidate list (its cheapest allowed merges stay), a capped join is skipped. When
 // the cap leaves too few merges to reach the count, the merge stops with an error rather than miss it. Only the splat
 // itself and its labels are carried: evidence and b2crig's per-splat state are dropped, never averaged.
@@ -38,6 +39,7 @@ struct MergeParams {
   size_t count = 0;
   const CageFaces* cage = nullptr;   // the distance cap, when set
   float max_extent_faces = 3.f;
+  float min_conf = 0.5f;             // as the binding's --cage-min-conf: a group under it measures against any layer
 };
 
 struct MergeStats {
