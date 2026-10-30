@@ -1,2 +1,3 @@
 xatlas f700c7790aaa030e794b52ba7791a05c085faf0c
 meshoptimizer 84907d6243e2e44181aec4a9ae0bc70267109338
+splat-transform 3.10.1 (PlayCanvas, MIT): not vendored; src/lod/merge.cpp ports its decimation (license in splat-transform/LICENSE)

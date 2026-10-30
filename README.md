@@ -2,7 +2,7 @@
 
 A from-scratch CUDA Gaussian-splat trainer, renderer and mesher for the b2crunner pipeline, and the posing / training
 backend of b2crig. One binary: training (`b2ctrain <dataset>`), rendering (`render`), depth / weight probes (`probe`),
-cage fitting (`fit-cage`) and meshing (`mesh-*`).
+cage fitting (`fit-cage`), splat LOD levels (`lod-merge`, `lod-distill`) and meshing (`mesh-*`).
 
 Targets NVIDIA Ada / Blackwell (sm_89, sm_120). Builds against CUDA 13 (12.8+ works) with CMake; no Torch, no Vulkan.
 
@@ -47,7 +47,8 @@ Design notes and measurements are in `docs/design.md`, current state in `docs/ST
   properties (`ev_views` is an effective, participation-ratio view count; see `src/train/evidence.cu`), which drives
   `--evidence-prune-inmask` and confidence-gated rendering (`render --confidence`). `--export-labels` votes each splat
   a class from `labels/` (b2crunner writes Sapiens2 Goliath ids [13]) by its rendered weight on each class's pixels
-  over every training view; the winner and its share land in the ply as `seg_label` and `seg_conf`.
+  over every training view; the winner and its share land in the ply as `seg_label` and `seg_conf`. A warm start whose
+  ply carries `seg_label` / `seg_conf` keeps them through to every export (new splats take their parent's).
 
 ### Recipes
 
@@ -115,6 +116,21 @@ b2crig animates a trained subject and makes every decision about the rig; this r
 - **`fit-cage`** fits per-frame cage displacements, dual-binding weights and optionally appearance to a video;
   **`render --cage`** renders any cage frame.
 
+## LOD levels: `lod-merge`, `lod-distill`
+
+Lower-count copies of a splat for b2cgltf's `MSFT_lod` chain (b2cgltf_lod_proposal.md):
+
+- **`lod-merge`**: a C++ port of the uniform decimation of PlayCanvas splat-transform [25] (`splat-transform -d N`, MIT):
+  16-NN edge costs, greedy disjoint grouping of up to 4, moment-matched merging, to an exact count. Only splats of
+  one `seg_label` merge; a merged splat's `seg_conf` is its group's minimum; `--cage` caps a merge's extent at
+  `--max-extent-faces` times its nearest cage face's mean edge. Evidence and b2crig per-splat state are dropped.
+- **`lod-distill`**: a warm fine-tune of a merged level against the full splat rendered at the dataset's views (growth
+  off, relocation on, grey noisy background).
+
+On crew-brazil (369,886 splats; PSNR against the full splat at 1/4 resolution over the 162 frame cameras), merge plus
+6000 distill steps gives 41.64 dB at 100k and 38.57 dB at 50k (splat-transform's merge with the same fine-tune: 41.02
+and 38.30).
+
 ## Meshing: `b2ctrain mesh-*`
 
 The textured mesh from the stage-2 views (`docs/mesh.md` for usage and verification, `docs/mesh-plan.md` for the plan):
@@ -142,7 +158,8 @@ the pipeline invokes them. `tools/bundle_study/` holds the scripts behind `docs/
 
 Vendored in `third_party/` (versions in `VERSIONS.txt`): [xatlas](https://github.com/jpcy/xatlas),
 [meshoptimizer](https://github.com/zeux/meshoptimizer), [stb](https://github.com/nothings/stb) image I/O and resize,
-and [nlohmann/json](https://github.com/nlohmann/json).
+and [nlohmann/json](https://github.com/nlohmann/json). `src/lod/merge.cpp` ports code from
+[splat-transform](https://github.com/playcanvas/splat-transform) (MIT; `third_party/splat-transform/LICENSE`).
 
 ## References
 
@@ -188,3 +205,4 @@ and [nlohmann/json](https://github.com/nlohmann/json).
 23. G. Rong, T.-S. Tan. *Jump Flooding in GPU with Applications to Voronoi Diagram and Distance Transform.* I3D 2006.
 24. M. Kocabas, J.-H. R. Chang, J. Gabriel, O. Tuzel, A. Ranjan. *HUGS: Human Gaussian Splats.* CVPR 2024.
     [arXiv:2311.17910](https://arxiv.org/abs/2311.17910)
+25. PlayCanvas. *splat-transform* 3.10.1 (MIT License). [github.com/playcanvas/splat-transform](https://github.com/playcanvas/splat-transform)

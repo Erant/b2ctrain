@@ -58,10 +58,13 @@ add_library(b2c_core STATIC
   src/train/trainer.cpp
   src/train/init.cpp
   src/train/evidence.cu
+  src/train/teacher.cu
   src/train/fit_cage.cu
   src/render/renderer.cpp
   src/render/confidence.cu
   src/render/probe.cpp
+  src/lod/merge.cpp
+  src/lod/lod_main.cpp
   src/mesh/common.cpp
   src/mesh/mesh_main.cpp
   src/mesh/raster.cu
@@ -126,6 +129,6 @@ add_executable(b2ctrain src/main.cpp)
 target_link_libraries(b2ctrain PRIVATE b2c_core)
 
 enable_testing()
-add_executable(b2c_tests tests/tests.cpp tests/reference.cpp tests/mesh_tests.cpp tests/cage_app_tests.cpp)
+add_executable(b2c_tests tests/tests.cpp tests/reference.cpp tests/mesh_tests.cpp tests/cage_app_tests.cpp tests/lod_tests.cpp)
 target_link_libraries(b2c_tests PRIVATE b2c_core)
 add_test(NAME b2c_tests COMMAND b2c_tests)

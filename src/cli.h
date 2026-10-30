@@ -30,7 +30,6 @@ struct Config {
   uint32_t normal_loss_start_iter = 5000, normal_loss_every = 1;
   float background_color[3] = {0, 0, 0};
   float background_noise_strength = 0.1f;
-  uint32_t lod_levels = 0, lod_refine_steps = 5000, lod_decimation_keep = 50, lod_image_scale = 50;
   std::optional<float> random_init_scene_scale;
   // model
   uint32_t sh_degree = 3;
@@ -100,6 +99,8 @@ struct Config {
   float cage_open_lr = 0.01f, cage_open_lr_opacity = 0.012f;
   float cage_open_reg = 0.f;
   float cage_open_snr = 0.f, cage_open_beta1 = 0.9f;
+  std::string init_ply;               // the warm start, instead of the dataset's init.ply (lod-distill)
+  std::string teacher;                // lod-distill: every view's target is this splat's render at it (lod/merge.h)
   std::string body_rig_init;          // seed rotations per view and joint (the layout of the exported body_rig_omega.json)
   uint32_t body_rig_start_iter = 1000;   // learn the per-view rotations from this iteration of the main run on
   uint32_t body_rig_stop_iter = 0;       // ... and stop at this one (0 = never; they then keep learning through the alignment refits)
@@ -119,8 +120,6 @@ struct Config {
   int device = 0;
   std::string checkpoint_dir;         // debug dumps
   bool help = false;
-
-  uint32_t total_iters() const { return total_train_iters + lod_levels * lod_refine_steps; }
 };
 
 // Parses brush's argv. Throws std::runtime_error on bad args (message is clap-like).

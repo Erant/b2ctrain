@@ -381,6 +381,8 @@ static int test_cull() {
 int test_mesh();
 int test_cage_app();
 
+int test_lod();
+
 int main(int argc, char** argv) {
   int mesh_fails = test_mesh();
   if (mesh_fails) printf("mesh: %d failure(s)\n", mesh_fails);
@@ -389,6 +391,7 @@ int main(int argc, char** argv) {
   int sparsify_fails = test_sparsify();
   sparsify_fails += test_cull();
   sparsify_fails += test_cage_app();
+  sparsify_fails += test_lod();
   if (deform_fails) printf("deform: %d failure(s)\n", deform_fails);
   if (argc > 1) g_eps = (float)atof(argv[1]);
   int fails = 0, total = 0, skipped = 0;

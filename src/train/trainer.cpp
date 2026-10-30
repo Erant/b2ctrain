@@ -18,6 +18,7 @@
 #include "dataset/mesh.h"
 #include "train/evidence.h"
 #include "train/gpu_views.h"
+#include "train/teacher.h"
 #include "util/log.h"
 #include "json.hpp"
 #include "stb_image_write.h"
@@ -95,8 +96,10 @@ int train_main(const Config& cfg) {
   cudaStream_t stream; CUDA_CHECK(cudaStreamCreate(&stream));
   double t_load = now_seconds();
   Dataset ds = load_dataset(cfg);
+  if (!cfg.init_ply.empty()) { ds.init_ply = cfg.init_ply; log_info("Using '%s' as the initial splat", ds.init_ply.c_str()); }
   SplatCloud init = initial_splats(ds, cfg);
   GpuViews gv; gv.upload(ds.train);
+  if (!cfg.teacher.empty()) render_teacher_targets(cfg.teacher, gv, stream);
   // The progressive resolution schedule is a cold-start device: a warm start (init.ply — b2crunner's polish and
   // alignment refits) trains at full resolution from its first step, as the brush runs it replaces did.
   const bool warm_start = !ds.init_ply.empty();
@@ -218,16 +221,17 @@ int train_main(const Config& cfg) {
   CageOpen open; int open_stats_due = 0; bool open_used = false;   // --cage-open (gpu/cage_open.h)
   std::vector<float> cage_face_stretch; DevBuf<float> cage_stretch_w;   // stretch regulariser (--cage-stretch-weight)
   std::vector<int> cage_view(ds.train.size(), -1);
-  std::vector<float> cage_labels;   // host [n][2] seg_label, seg_conf: what bind() reads; new splats inherit their parent's
+  // seg_label / seg_conf of the warm start (host [n][2]), carried to every export: new splats take their parent's, a
+  // compaction drops the pruned ones' (--cage binds by them).
+  std::vector<float> labels = init.has_labels ? init.labels : std::vector<float>{};
   if (!cfg.cage.empty()) {
     if (have_rig) fail("--cage and --body-rig are exclusive");
-    if (cfg.sparsify > 0.f) fail("--cage does not follow --sparsify's compaction (the labels would fall out of step)");
+    if (cfg.sparsify > 0.f) fail("--cage does not follow --sparsify's compaction (the binding would fall out of step)");
     if (!cage.load(cfg.cage)) fail("--cage %s: cannot open", cfg.cage.c_str());
-    SplatCloud lc;   // the warm-start loader keeps no labels / gates: read them from the ply itself
+    SplatCloud lc;   // the warm-start loader keeps no gates / open state: read them from the ply itself
     if ((!init.has_labels || cfg.cage_open) && !ds.init_ply.empty()) lc = read_ply(ds.init_ply);
-    if (init.has_labels) cage_labels = init.labels;
-    else if (lc.has_labels && lc.n == init.n) cage_labels = lc.labels;
-    if (cage_labels.size() != init.n * 2) fail("--cage needs a warm start whose init.ply carries seg_label (the cage binding)");
+    if (!init.has_labels && lc.has_labels && lc.n == init.n) labels = lc.labels;
+    if (labels.size() != init.n * 2) fail("--cage needs a warm start whose init.ply carries seg_label (the cage binding)");
     if (cfg.cage_open) {
       if (cfg.cage_app) fail("--cage-open and --cage-app are exclusive");
       if (lc.n != init.n) fail("--cage-open: init.ply not readable / size mismatch");
@@ -243,7 +247,7 @@ int train_main(const Config& cfg) {
       if (fr < 0) { auto d0 = nm.find('@'); if (d0 != std::string::npos) fr = cage.frame_index(nm.substr(0, d0)); }
       cage_view[i] = fr; matched += fr >= 0;
     }
-    cage.bind(model, cage_labels, cfg.cage_min_conf, stream);
+    cage.bind(model, labels, cfg.cage_min_conf, stream);
     cage.max_growth = cfg.cage_max_growth;
     cage.fade_start = cfg.cage_fade_start; cage.fade_end = cfg.cage_fade_end;
     have_cage = true;
@@ -315,17 +319,27 @@ int train_main(const Config& cfg) {
     log_info("Pose containment: %d views (%dx%d) from %s, %d/%d splats left out of the targets, dilate %u px, weight %g on %.0f%% of the steps (%.1fs)",
              N, W2, H2, cfg.pose_contain_cameras.c_str(), contain.n_deep, model.n, cfg.pose_contain_dilate, cfg.pose_contain_weight, 100.f * contain.fraction, now_seconds() - tb);
   }
-  auto cage_rebind = [&]() {   // after refine: children take their parent's label, then every splat is bound again
-    if (!have_cage) return;
-    cage_labels.resize((size_t)model.n * 2, 0.f);
+  auto compact_labels = [&](const DevBuf<uint32_t>& keep) {   // before model.compact(keep): the same rows survive
+    if (labels.empty()) return;
+    auto k = keep.download((size_t)model.n, stream);
+    size_t o = 0;
+    for (size_t i = 0; i < k.size(); i++) if (k[i]) { labels[o * 2] = labels[i * 2]; labels[o * 2 + 1] = labels[i * 2 + 1]; o++; }
+    labels.resize(o * 2);
+  };
+  auto inherit_labels = [&]() {   // after refine: children take their parent's label
+    if (labels.empty()) return;
+    labels.resize((size_t)model.n * 2, 0.f);
     if (refine.last_pairs > 0) {
       auto par = refine.sel_parent.download(refine.last_pairs, stream), chi = refine.sel_child.download(refine.last_pairs, stream);
       for (uint32_t k = 0; k < refine.last_pairs; k++) {
         if ((int)chi[k] >= model.n || (int)par[k] >= model.n) continue;
-        cage_labels[(size_t)chi[k] * 2] = cage_labels[(size_t)par[k] * 2]; cage_labels[(size_t)chi[k] * 2 + 1] = cage_labels[(size_t)par[k] * 2 + 1];
+        labels[(size_t)chi[k] * 2] = labels[(size_t)par[k] * 2]; labels[(size_t)chi[k] * 2 + 1] = labels[(size_t)par[k] * 2 + 1];
       }
     }
-    cage.bind(model, cage_labels, cfg.cage_min_conf, stream);
+  };
+  auto cage_rebind = [&]() {   // after refine: every splat is bound again
+    if (!have_cage) return;
+    cage.bind(model, labels, cfg.cage_min_conf, stream);
     if (!cage_face_stretch.empty()) cage_stretch_w.upload(cage.splat_stretch_weights(cage_face_stretch, cfg.cage_stretch_weight, stream), stream);
     if (open.on) open.inherit(refine.sel_parent, refine.sel_child, refine.last_pairs, model.n, stream);
   };
@@ -383,7 +397,7 @@ int train_main(const Config& cfg) {
     bool want_evidence = (final_export && (cfg.evidence_prune_inmask.has_value() || cfg.evidence_prune_wall.has_value() || want_labels)) || cfg.export_evidence;
     SplatCloud c = model.download(stream);
     bake_min_scale_cpu(c, model, stream);
-    if (have_cage && cage_labels.size() == c.n * 2) { c.labels = cage_labels; c.has_labels = true; }
+    if (labels.size() == c.n * 2) { c.labels = labels; c.has_labels = true; }
     if (open.on) open.download(c, stream);
     if (want_evidence) {
       double te = now_seconds();
@@ -535,6 +549,7 @@ int train_main(const Config& cfg) {
           if (spa.by_importance) refresh_importance();
           const int before = model.n;
           const uint32_t kept = spa.final_flags(model, stream);
+          compact_labels(spa.flags);
           model.compact(spa.flags, {}, stream);
           spa.active = false; spa_done = true;
           refine.update_bounds(model, stream); bounds = refine.bounds; median_scale = bounds.median_size();
@@ -573,12 +588,14 @@ int train_main(const Config& cfg) {
         RefineStats rs = refine.run(model, ctx, rpar, stream);
         if (rpar.no_new && rs.pruned > 0) {
           // The dead are killed, not relocated: drop them (and their z, u, score while the phase runs).
+          compact_labels(refine.keep);
           model.compact(refine.keep, spa.active ? spa.state() : std::vector<DevBuf<float>*>{}, stream);
           refine.update_bounds(model, stream);
         }
         if (model.cap > (int)ctx.tile_count.count) ctx.setup(ctx.W, ctx.H, model.cap, stream);
         bounds = refine.bounds; median_scale = bounds.median_size();
         if (have_rig) rig.bind(model, stream);  // new and moved splats take the binding of their nearest rig vertex
+        inherit_labels();
         cage_rebind();
         log_info("Refine iter %u, %d splats (pruned %d of which culled %d, split %d, grown %d).", step, model.n, rs.pruned, rs.culled, rs.split_oversized, rs.grown);
         timer.mark("refine", stream);

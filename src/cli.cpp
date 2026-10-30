@@ -85,12 +85,6 @@ const std::vector<std::pair<const char*, std::vector<Opt>>>& groups() {
       {"match-alpha-weight", "MATCH_ALPHA_WEIGHT", "Weight of l1 loss on alpha if input view has transparency [default: 0.1]", F(match_alpha_weight)},
       {"lpips-loss-weight", "LPIPS_LOSS_WEIGHT", "[default: 0.0] (unsupported in b2ctrain)", F(lpips_loss_weight)},
     }},
-    {"LOD options", {
-      {"lod-levels", "LOD_LEVELS", "Number of LOD levels to generate after initial training (0 = disabled) [default: 0]", U(lod_levels)},
-      {"lod-refine-steps", "LOD_REFINE_STEPS", "[default: 5000]", U(lod_refine_steps)},
-      {"lod-decimation-keep", "LOD_DECIMATION_KEEP", "[default: 50]", U(lod_decimation_keep)},
-      {"lod-image-scale", "LOD_IMAGE_SCALE", "[default: 50]", U(lod_image_scale)},
-    }},
     {"Model Options", {
       {"sh-degree", "SH_DEGREE", "SH degree of splats [default: 3]", U(sh_degree)},
     }},

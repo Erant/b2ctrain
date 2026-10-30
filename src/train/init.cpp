@@ -132,7 +132,6 @@ SplatCloud initial_splats(const Dataset& ds, const Config& cfg) {
     c.sh = std::move(sh); c.sh_degree = (int)cfg.sh_degree;
   }
   c.has_evidence = false; c.evidence.clear();
-  c.has_labels = false; c.labels.clear();
   return c;
 }
 
